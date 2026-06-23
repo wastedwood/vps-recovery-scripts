@@ -41,4 +41,4 @@ CDN证书成功后，再把CDN子域名切换为橙云，并将Cloudflare SSL/TL
 
 ## 状态
 
-Reality、HY2、CDN与订阅模块已经分别实测。三合一合并脚本等待全新VPS整体复测。
+已于2026年6月23日在全新Vultr VPS完成三合一整体实测：Reality、Hysteria 2、Cloudflare CDN、BBR和Clash Verge统一订阅均可用。

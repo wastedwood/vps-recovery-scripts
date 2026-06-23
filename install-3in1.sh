@@ -36,7 +36,7 @@
 # - 自动生成新的 UUID、REALITY 密钥、Short ID 和 WebSocket 路径。
 # - 不创建网页面板、数据库或流量统计；订阅文件由本机 Caddy 自托管。
 #
-# 状态：Reality、CDN、HY2分别实测通过；三合一合并流程待全新VPS实测。
+# 状态：已在全新Vultr VPS完整实测，Reality、CDN、HY2、BBR和Clash订阅均可用。
 # 最后审查：2026-06-23
 
 set -Eeuo pipefail
