@@ -2,21 +2,21 @@
 #
 # 推荐用法（登录全新 VPS 后，直接运行一行命令）：
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-3in1.sh)
 #
 # 备用用法（从 Windows 手动上传本脚本）：
 #
 # 1. 将下面命令中的 <服务器IP> 替换为新 VPS 的公网 IPv4。
 #
 # 2. 从 Windows 上传本脚本：
-#    scp "<本地路径>\scripts\install-xray-core.sh" root@<服务器IP>:/root/
+#    scp "<本地路径>\scripts\install-3in1.sh" root@<服务器IP>:/root/
 #
 # 3. SSH 登录新 VPS：
 #    ssh root@<服务器IP>
 #
 # 4. 登录 VPS 后，授权并运行脚本：
-#    chmod +x /root/install-xray-core.sh
-#    /root/install-xray-core.sh
+#    chmod +x /root/install-3in1.sh
+#    /root/install-3in1.sh
 #
 # 注意：
 # - 只能在全新的 Debian 12/13 VPS 上运行。
@@ -535,8 +535,10 @@ install_hysteria() {
     die "Hysteria 安装后未找到 systemd 服务。"
 
   local hysteria_version
-  hysteria_version="$(hysteria version 2>/dev/null || true)"
-  hysteria_version="${hysteria_version%%$'\n'*}"
+  hysteria_version="$(
+    hysteria version 2>&1 |
+      awk '/^Version[[:space:]]/ {print $2; exit}'
+  )" || true
   ok "Hysteria 安装完成：${hysteria_version:-版本未知}"
 }
 
@@ -775,11 +777,9 @@ verify_listeners() {
   udp_port_is_listening "${HY2_PORT}" || die "Hysteria 没有监听 UDP ${HY2_PORT}。"
   ok "Reality TCP 443、HY2 UDP 443、CDN 8443和内部WebSocket端口均正常"
 
-  local hysteria_log
-  hysteria_log="$(journalctl -u "${HYSTERIA_SERVICE}" -n 100 --no-pager)"
-  grep -Fq 'server up and running' <<<"${hysteria_log}" ||
-    die "Hysteria日志中没有找到server up and running。"
-  ok "Hysteria日志确认服务已正常运行"
+  systemctl is-active --quiet "${HYSTERIA_SERVICE}" ||
+    die "Hysteria服务已停止。"
+  ok "Hysteria服务状态和UDP监听均正常"
 
   printf '正在等待 Caddy 申请证书，最长等待 %s 秒' "${CERT_WAIT_SECONDS}"
   local elapsed=0

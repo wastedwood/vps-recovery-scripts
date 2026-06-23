@@ -23,7 +23,7 @@
 ## 一行安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-3in1.sh)
 ```
 
 脚本仅适用于全新的 Debian 12/13 VPS，不覆盖已有 Xray、Caddy 或 Hysteria 部署。
