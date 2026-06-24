@@ -1,6 +1,6 @@
 # VPS Recovery Scripts
 
-在全新的 Debian 12/13 VPS 上，一次部署三条独立代理通道：
+一次部署三条独立代理通道：
 
 - VLESS + Reality：TCP 443
 - Hysteria 2：UDP 443
@@ -26,7 +26,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-3in1.sh)
 ```
 
-脚本仅适用于全新的 Debian 12/13 VPS，不覆盖已有 Xray、Caddy 或 Hysteria 部署。
+脚本不覆盖已有 Xray、Caddy 或 Hysteria 部署。
 
 ## 安装结果
 
@@ -38,7 +38,3 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scri
 - Clash Verge / Mihomo 统一订阅地址
 
 CDN证书成功后，再把CDN子域名切换为橙云，并将Cloudflare SSL/TLS模式设为“完全（严格）”。HY2子域名不能开启橙云。
-
-## 状态
-
-已于2026年6月23日在全新Vultr VPS完成三合一整体实测：Reality、Hysteria 2、Cloudflare CDN、BBR和Clash Verge统一订阅均可用。
