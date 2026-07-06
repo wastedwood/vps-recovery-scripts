@@ -1,48 +1,41 @@
 #!/usr/bin/env bash
 #
-# 在全新 Debian 12/13 VPS 上运行：
-#
+# Fresh Debian 12/13 installer:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-4in1.sh)
 #
-# 四个客户端节点：
-#   1. VLESS + Reality，VPS原生出口
-#   2. VLESS + Reality，Cloudflare WARP出口
-#   3. Hysteria 2
-#   4. VLESS + WebSocket + Cloudflare Tunnel（Argo）
-#
-# 唯一代理内核为 Sing-box。Caddy、cloudflared 和官方 WARP 客户端只承担辅助职责。
-# 脚本只面向空白服务器；发现已有部署或端口冲突时立即停止，不覆盖、不卸载。
+# Nodes: Reality direct, Reality via WARP, Hysteria 2, and VLESS WebSocket via Argo.
+# Sing-box is the only proxy core. It owns HY2 ACME and the WARP WireGuard endpoint.
 
 set -Eeuo pipefail
 umask 077
 
 readonly SING_BOX_VERSION="1.13.14"
 readonly CLOUDFLARED_VERSION="2026.6.1"
+readonly WGCF_VERSION="2.2.31"
 readonly SING_BOX_SHA256_AMD64="f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697"
 readonly SING_BOX_SHA256_ARM64="4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e"
 readonly CLOUDFLARED_SHA256_AMD64="5861a10a438fe8ddcfebb3b830f83966cbf193edafce0fe2eeb198fbae1f7a22"
 readonly CLOUDFLARED_SHA256_ARM64="59816ce9b16db71f5bc2a86d59b3632a96c8c3ee934bde2bc8641ee83a6070eb"
+readonly WGCF_SHA256_AMD64="69147e1a517c66129edd8ac8cb60484d6c9515178d7b4a2f95e3c925f225572a"
+readonly WGCF_SHA256_ARM64="b9bdbdeaa3f9f4ba741ba55b8bd94c24f7166c27668eb7e8192ccf9746961182"
 
 readonly SING_BOX_CONFIG="/etc/sing-box/config.json"
 readonly SING_BOX_SERVICE="/etc/systemd/system/sing-box.service"
-readonly CADDY_CONFIG="/etc/caddy/Caddyfile"
 readonly CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
 readonly CLOUDFLARED_SERVICE="/etc/systemd/system/cloudflared-argo.service"
 readonly ARGO_TOKEN_FILE="/etc/cloudflared/token"
 readonly BBR_CONFIG="/etc/sysctl.d/99-bbr.conf"
 readonly RESULT_FILE="/root/sing-box-client-info.txt"
 readonly CLASH_PROFILE="/root/clash-verge.yaml"
-readonly SUBSCRIPTION_DIR="/var/lib/caddy/subscriptions"
 
 readonly REALITY_PORT="443"
 readonly HY2_PORT="443"
 readonly ARGO_WS_LOCAL_PORT="10001"
-readonly ARGO_CADDY_LOCAL_PORT="10002"
-readonly HY2_CERT_LOCAL_PORT="10003"
-readonly WARP_PROXY_PORT="40000"
+readonly WARP_TEST_PORT="40000"
 readonly REALITY_TARGET="www.debian.org:443"
 readonly REALITY_SERVER_NAME="www.debian.org"
 readonly CERT_WAIT_SECONDS="180"
+readonly ROUTE_WAIT_SECONDS="60"
 
 TEMP_DIR=""
 STEP_NO=0
@@ -51,42 +44,23 @@ HY2_DOMAIN=""
 ARGO_DOMAIN=""
 ARGO_TOKEN=""
 ACME_EMAIL=""
-HY2_CERT_PATH=""
-HY2_KEY_PATH=""
+ARCH=""
+SING_BOX_SHA256=""
+CLOUDFLARED_SHA256=""
+WGCF_SHA256=""
+WARP_PRIVATE_KEY=""
+WARP_IPV4=""
+WARP_IPV6=""
+WARP_PEER_PUBLIC_KEY=""
+WARP_ENDPOINT_HOST=""
+WARP_ENDPOINT_PORT=""
 
 if [[ -t 1 ]]; then
-  readonly COLOR_GREEN=$'\033[1;32m'
-  readonly COLOR_YELLOW=$'\033[1;33m'
-  readonly COLOR_RED=$'\033[1;31m'
-  readonly COLOR_CYAN=$'\033[1;36m'
-  readonly COLOR_BOLD=$'\033[1m'
-  readonly COLOR_RESET=$'\033[0m'
+  readonly GREEN=$'\033[1;32m' YELLOW=$'\033[1;33m' RED=$'\033[1;31m'
+  readonly CYAN=$'\033[1;36m' BOLD=$'\033[1m' RESET=$'\033[0m'
 else
-  readonly COLOR_GREEN=""
-  readonly COLOR_YELLOW=""
-  readonly COLOR_RED=""
-  readonly COLOR_CYAN=""
-  readonly COLOR_BOLD=""
-  readonly COLOR_RESET=""
+  readonly GREEN="" YELLOW="" RED="" CYAN="" BOLD="" RESET=""
 fi
-
-say() {
-  STEP_NO=$((STEP_NO + 1))
-  printf '\n%s[%s] %s%s\n' "${COLOR_CYAN}" "${STEP_NO}" "$1" "${COLOR_RESET}"
-}
-
-ok() {
-  printf '%s完成：%s%s\n' "${COLOR_GREEN}" "$1" "${COLOR_RESET}"
-}
-
-warn() {
-  printf '%s警告：%s%s\n' "${COLOR_YELLOW}" "$1" "${COLOR_RESET}" >&2
-}
-
-die() {
-  printf '%s错误：%s%s\n' "${COLOR_RED}" "$1" "${COLOR_RESET}" >&2
-  exit 1
-}
 
 cleanup() {
   if [[ -n "${TEMP_DIR}" && -d "${TEMP_DIR}" ]]; then
@@ -94,165 +68,129 @@ cleanup() {
   fi
 }
 
+on_error() {
+  local exit_code=$?
+  printf '\n错误：脚本在第 %s 行停止，退出码 %s。\n' "${1:-unknown}" "${exit_code}" >&2
+  printf '请保留上方第一条错误信息，不要直接重复运行。\n' >&2
+  exit "${exit_code}"
+}
+
 trap cleanup EXIT
-trap 'die "第 ${STEP_NO} 步执行失败，请先处理上方第一条错误，不要反复运行脚本。"' ERR
+trap 'on_error "$LINENO"' ERR
+
+say() { STEP_NO=$((STEP_NO + 1)); printf '\n%s[步骤 %s] %s%s\n' "${CYAN}" "${STEP_NO}" "$1" "${RESET}"; }
+ok() { printf '%s✓ %s%s\n' "${GREEN}" "$1" "${RESET}"; }
+warn() { printf '%s! %s%s\n' "${YELLOW}" "$1" "${RESET}" >&2; }
+die() { printf '\n%s错误：%s%s\n' "${RED}" "$1" "${RESET}" >&2; exit 1; }
 
 require_root() {
   [[ "${EUID}" -eq 0 ]] || die "请使用 root 用户运行。"
 }
 
 require_debian() {
-  [[ -r /etc/os-release ]] || die "无法识别操作系统。"
+  [[ -r /etc/os-release ]] || die "无法读取系统版本。"
   # shellcheck disable=SC1091
   source /etc/os-release
-  [[ "${ID:-}" == "debian" ]] || die "只支持 Debian 12/13。"
-  [[ "${VERSION_ID:-}" == "12" || "${VERSION_ID:-}" == "13" ]] \
-    || die "只支持 Debian 12/13，当前版本为 ${VERSION_ID:-未知}。"
-  [[ "${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}" =~ ^(bookworm|trixie)$ ]] \
-    || die "无法识别 Debian 软件源代号。"
-}
-
-port_is_listening() {
-  local port="$1"
-  ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
-}
-
-udp_port_is_listening() {
-  local port="$1"
-  ss -H -lun "sport = :${port}" 2>/dev/null | grep -q .
-}
-
-refuse_existing_installation() {
-  say "检查已有部署和端口"
-
-  command -v ss >/dev/null 2>&1 \
-    || die "系统缺少端口检查工具 ss，无法安全确认端口是否空闲。"
-
-  local command_name
-  for command_name in xray sing-box hysteria caddy cloudflared warp-cli; do
-    if command -v "${command_name}" >/dev/null 2>&1; then
-      die "检测到已有 ${command_name}。本脚本不会覆盖现有部署。"
-    fi
-  done
-
-  local path
-  for path in \
-    /etc/sing-box \
-    /usr/local/etc/xray \
-    /etc/hysteria \
-    /etc/caddy/Caddyfile \
-    /etc/cloudflared \
-    /var/lib/cloudflare-warp; do
-    [[ ! -e "${path}" ]] || die "检测到已有路径 ${path}。本脚本不会覆盖。"
-  done
-
-  local service_name
-  for service_name in sing-box.service xray.service hysteria-server.service caddy.service cloudflared.service cloudflared-argo.service warp-svc.service; do
-    if systemctl list-unit-files "${service_name}" 2>/dev/null | grep -q "${service_name}"; then
-      die "检测到已有服务 ${service_name}。本脚本不会覆盖。"
-    fi
-  done
-
-  local tcp_port
-  for tcp_port in 80 "${REALITY_PORT}" "${ARGO_WS_LOCAL_PORT}" "${ARGO_CADDY_LOCAL_PORT}" "${HY2_CERT_LOCAL_PORT}" "${WARP_PROXY_PORT}"; do
-    port_is_listening "${tcp_port}" && die "TCP端口 ${tcp_port} 已被占用。"
-  done
-  udp_port_is_listening "${HY2_PORT}" && die "UDP端口 ${HY2_PORT} 已被占用。"
-
-  ok "未发现会被覆盖的部署或端口"
+  [[ "${ID:-}" == "debian" ]] || die "目前只支持 Debian 12/13。"
+  case "${VERSION_ID:-}" in 12|13) ;; *) die "检测到 Debian ${VERSION_ID:-未知版本}，仅支持12/13。" ;; esac
 }
 
 valid_domain() {
   [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
 }
 
-read_inputs() {
-  printf '\n%sSing-box 四合一部署%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '准备两个Cloudflare子域名：\n'
-  printf '  1. HY2域名：始终灰云。\n'
-  printf '  2. Argo域名：固定Tunnel服务地址设为 http://localhost:%s。\n' "${ARGO_CADDY_LOCAL_PORT}"
+port_is_listening() { ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${1}$"; }
+udp_port_is_listening() { ss -lunH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${1}$"; }
 
-  read -r -p "HY2完整域名: " HY2_DOMAIN
+refuse_existing_installation() {
+  say "检查服务器是否为空白环境"
+  command -v ss >/dev/null 2>&1 || die "系统缺少 ss，无法检查端口。"
+  local command_name
+  for command_name in xray sing-box hysteria cloudflared; do
+    command -v "${command_name}" >/dev/null 2>&1 && die "检测到已有 ${command_name}，不会覆盖。"
+  done
+  local path
+  for path in /etc/sing-box /usr/local/etc/xray /etc/hysteria /etc/cloudflared; do
+    [[ ! -e "${path}" ]] || die "检测到已有路径 ${path}，不会覆盖。"
+  done
+  local service_name
+  for service_name in sing-box.service xray.service hysteria-server.service cloudflared.service cloudflared-argo.service; do
+    systemctl list-unit-files "${service_name}" 2>/dev/null | grep -q "${service_name}" \
+      && die "检测到已有服务 ${service_name}，不会覆盖。"
+  done
+  port_is_listening 80 && die "TCP 80 已被占用，Sing-box无法完成HY2证书验证。"
+  port_is_listening "${REALITY_PORT}" && die "TCP 443 已被占用。"
+  port_is_listening "${ARGO_WS_LOCAL_PORT}" && die "TCP ${ARGO_WS_LOCAL_PORT} 已被占用。"
+  port_is_listening "${WARP_TEST_PORT}" && die "TCP ${WARP_TEST_PORT} 已被占用。"
+  udp_port_is_listening "${HY2_PORT}" && die "UDP 443 已被占用。"
+  ok "未发现冲突"
+}
+
+read_inputs() {
+  printf '\n%sSing-box 四合一部署%s\n' "${BOLD}" "${RESET}"
+  printf '要求：TCP 80/443、UDP 443已放行；HY2域名保持灰云。\n'
+  printf '固定Tunnel的服务地址必须设置为 http://localhost:%s。\n\n' "${ARGO_WS_LOCAL_PORT}"
+
+  read -r -p "HY2完整域名（例如 hy2.example.com）: " HY2_DOMAIN
   HY2_DOMAIN="${HY2_DOMAIN,,}"
   valid_domain "${HY2_DOMAIN}" || die "HY2域名格式不正确。"
-  HY2_CERT_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.crt"
-  HY2_KEY_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.key"
 
-  read -r -p "Argo固定域名: " ARGO_DOMAIN
+  read -r -p "Argo完整域名（例如 argo.example.com）: " ARGO_DOMAIN
   ARGO_DOMAIN="${ARGO_DOMAIN,,}"
   valid_domain "${ARGO_DOMAIN}" || die "Argo域名格式不正确。"
+  [[ "${ARGO_DOMAIN}" != "${HY2_DOMAIN}" ]] || die "HY2和Argo必须使用不同域名。"
 
-  [[ "${HY2_DOMAIN}" != "${ARGO_DOMAIN}" ]] || die "两个用途必须使用不同子域名。"
-
-  read -r -s -p "Argo Tunnel Token（输入时不会显示）: " ARGO_TOKEN
+  read -r -s -p "固定Tunnel Token（输入时不显示）: " ARGO_TOKEN
   printf '\n'
-  [[ -n "${ARGO_TOKEN}" ]] || die "Argo Token不能为空。"
-  [[ "${ARGO_TOKEN}" != *[[:space:]]* ]] || die "Argo Token不能包含空格或换行。"
+  [[ -n "${ARGO_TOKEN}" ]] || die "Tunnel Token不能为空。"
 
-  read -r -p "证书联系邮箱（可直接回车）: " ACME_EMAIL
+  read -r -p "ACME邮箱（可直接回车跳过）: " ACME_EMAIL
   if [[ -n "${ACME_EMAIL}" && ! "${ACME_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
     die "邮箱格式不正确。"
   fi
 
-  printf '\n即将部署：\n'
-  printf '  Reality直连和WARP：TCP 443，目标 %s\n' "${REALITY_TARGET}"
-  printf '  HY2：%s UDP 443\n' "${HY2_DOMAIN}"
-  printf '  Argo及订阅：%s → Caddy本机端口 %s\n' "${ARGO_DOMAIN}" "${ARGO_CADDY_LOCAL_PORT}"
-  read -r -p "确认DNS和Tunnel设置无误后输入 DEPLOY: " confirmation
+  read -r -p "确认设置无误后输入 DEPLOY: " confirmation
   [[ "${confirmation}" == "DEPLOY" ]] || die "用户取消。"
 }
 
 install_base_packages() {
   say "安装基础工具"
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    ca-certificates curl dnsutils gnupg jq lsb-release openssl tar iproute2
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl dnsutils jq openssl tar iproute2
   ok "基础工具已安装"
 }
 
 enable_bbr() {
   say "启用BBR和fq"
-  printf '%s\n' \
-    'net.core.default_qdisc=fq' \
-    'net.ipv4.tcp_congestion_control=bbr' \
-    >"${BBR_CONFIG}"
+  cat >"${BBR_CONFIG}" <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
   sysctl --system >/dev/null
-  [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == "bbr" ]] \
-    || die "BBR未能启用。"
-  ok "BBR已启用"
+  [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == "bbr" ]] || die "BBR未成功启用。"
+  ok "BBR和fq已启用"
 }
 
 detect_public_ip_and_dns() {
-  say "核对公网IP和灰云DNS"
-  SERVER_IP="$(curl -4fsS --max-time 10 https://api.ipify.org || true)"
-  [[ "${SERVER_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-    || die "无法取得VPS公网IPv4。"
-
-  local domain
-  for domain in "${HY2_DOMAIN}"; do
-    mapfile -t domain_ips < <(
-      dig +short A "${domain}" |
-        grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' |
-        sort -u
-    )
-    [[ "${#domain_ips[@]}" -gt 0 ]] || die "${domain} 没有A记录。"
-    printf '%s\n' "${domain_ips[@]}" | grep -Fxq "${SERVER_IP}" \
-      || die "${domain} 未以灰云方式解析到当前VPS ${SERVER_IP}。"
-  done
-  ok "HY2域名以灰云指向当前VPS"
+  say "核对公网IPv4和DNS"
+  SERVER_IP="$(curl -4fsS --max-time 10 https://api.ipify.org)" || die "无法获取公网IPv4。"
+  [[ "${SERVER_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "公网IPv4格式异常。"
+  local hy2_ip
+  hy2_ip="$(dig +short A "${HY2_DOMAIN}" | tail -n1)"
+  [[ "${hy2_ip}" == "${SERVER_IP}" ]] \
+    || die "${HY2_DOMAIN} 当前解析为 ${hy2_ip:-无记录}，应为 ${SERVER_IP}，并保持灰云。"
+  ok "HY2域名正确解析到 ${SERVER_IP}"
 }
 
 architecture_values() {
   case "$(uname -m)" in
-    x86_64)
-      ARCH="amd64"
-      SING_BOX_SHA256="${SING_BOX_SHA256_AMD64}"
-      CLOUDFLARED_SHA256="${CLOUDFLARED_SHA256_AMD64}"
+    x86_64|amd64)
+      ARCH="amd64"; SING_BOX_SHA256="${SING_BOX_SHA256_AMD64}"
+      CLOUDFLARED_SHA256="${CLOUDFLARED_SHA256_AMD64}"; WGCF_SHA256="${WGCF_SHA256_AMD64}"
       ;;
     aarch64|arm64)
-      ARCH="arm64"
-      SING_BOX_SHA256="${SING_BOX_SHA256_ARM64}"
-      CLOUDFLARED_SHA256="${CLOUDFLARED_SHA256_ARM64}"
+      ARCH="arm64"; SING_BOX_SHA256="${SING_BOX_SHA256_ARM64}"
+      CLOUDFLARED_SHA256="${CLOUDFLARED_SHA256_ARM64}"; WGCF_SHA256="${WGCF_SHA256_ARM64}"
       ;;
     *) die "不支持CPU架构 $(uname -m)。" ;;
   esac
@@ -262,222 +200,162 @@ install_sing_box() {
   say "安装固定版本Sing-box"
   architecture_values
   local archive="sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz"
-  local url="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
-  curl -fL --retry 2 "${url}" -o "${TEMP_DIR}/${archive}"
-  printf '%s  %s\n' "${SING_BOX_SHA256}" "${TEMP_DIR}/${archive}" |
-    sha256sum -c - >/dev/null
+  curl -fL --retry 2 "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}" \
+    -o "${TEMP_DIR}/${archive}"
+  printf '%s  %s\n' "${SING_BOX_SHA256}" "${TEMP_DIR}/${archive}" | sha256sum -c - >/dev/null
   tar -xzf "${TEMP_DIR}/${archive}" -C "${TEMP_DIR}"
-  install -m 755 \
-    "${TEMP_DIR}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}/sing-box" \
-    /usr/local/bin/sing-box
-  ok "Sing-box $(sing-box version | awk '/version/ {print $3; exit}') 已安装并校验"
-}
-
-install_caddy() {
-  say "安装官方Caddy"
-  curl -1fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key |
-    gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
-    -o /etc/apt/sources.list.d/caddy-stable.list
-  chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-    /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy
-  ok "Caddy $(caddy version | head -n1) 已安装"
+  install -m 755 "${TEMP_DIR}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}/sing-box" /usr/local/bin/sing-box
+  sing-box version | grep -q 'with_acme' || die "Sing-box构建不含ACME功能。"
+  sing-box version | grep -q 'with_wireguard' || die "Sing-box构建不含WireGuard功能。"
+  ok "Sing-box ${SING_BOX_VERSION} 已安装并校验"
 }
 
 install_cloudflared() {
   say "安装固定版本cloudflared"
-  architecture_values
   local url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}"
   curl -fL --retry 2 "${url}" -o "${TEMP_DIR}/cloudflared"
-  printf '%s  %s\n' "${CLOUDFLARED_SHA256}" "${TEMP_DIR}/cloudflared" |
-    sha256sum -c - >/dev/null
+  printf '%s  %s\n' "${CLOUDFLARED_SHA256}" "${TEMP_DIR}/cloudflared" | sha256sum -c - >/dev/null
   install -m 755 "${TEMP_DIR}/cloudflared" "${CLOUDFLARED_BIN}"
-  ok "cloudflared $(${CLOUDFLARED_BIN} --version | awk '{print $3}') 已安装并校验"
+  ok "cloudflared ${CLOUDFLARED_VERSION} 已安装并校验"
 }
 
-install_warp() {
-  say "安装Cloudflare官方WARP客户端"
-  curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg |
-    gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-  chmod 644 /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-  local codename
-  codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")"
-  printf 'deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ %s main\n' "${codename}" \
-    >/etc/apt/sources.list.d/cloudflare-client.list
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cloudflare-warp
+generate_warp_profile() {
+  say "生成Sing-box内置WARP凭据"
+  local wgcf="${TEMP_DIR}/wgcf"
+  local profile="${TEMP_DIR}/wgcf-profile.conf"
+  curl -fL --retry 2 \
+    "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${ARCH}" \
+    -o "${wgcf}"
+  printf '%s  %s\n' "${WGCF_SHA256}" "${wgcf}" | sha256sum -c - >/dev/null
+  chmod 700 "${wgcf}"
+  (
+    cd "${TEMP_DIR}"
+    "${wgcf}" register --accept-tos >/dev/null
+    "${wgcf}" generate >/dev/null
+  )
 
-  systemctl enable --now warp-svc >/dev/null
-  if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
-    warp-cli --accept-tos registration new >/dev/null
-  fi
-  warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null
-  warp-cli --accept-tos mode proxy >/dev/null
-  warp-cli --accept-tos proxy port "${WARP_PROXY_PORT}" >/dev/null
-  warp-cli --accept-tos connect >/dev/null
+  WARP_PRIVATE_KEY="$(awk -F' *= *' '/^PrivateKey/ {print $2; exit}' "${profile}")"
+  local addresses endpoint
+  addresses="$(awk -F' *= *' '/^Address/ {print $2; exit}' "${profile}")"
+  WARP_IPV4="$(tr ',' '\n' <<<"${addresses}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -m1 '\.')"
+  WARP_IPV6="$(tr ',' '\n' <<<"${addresses}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -m1 ':')"
+  WARP_PEER_PUBLIC_KEY="$(awk -F' *= *' '/^PublicKey/ {print $2; exit}' "${profile}")"
+  endpoint="$(awk -F' *= *' '/^Endpoint/ {print $2; exit}' "${profile}")"
+  WARP_ENDPOINT_HOST="${endpoint%:*}"
+  WARP_ENDPOINT_PORT="${endpoint##*:}"
+  WARP_ENDPOINT_HOST="${WARP_ENDPOINT_HOST#[}"
+  WARP_ENDPOINT_HOST="${WARP_ENDPOINT_HOST%]}"
 
-  local elapsed=0
-  while (( elapsed < 60 )); do
-    if ss -H -ltn "sport = :${WARP_PROXY_PORT}" 2>/dev/null |
-      grep -Eq '127\.0\.0\.1|\[::1\]'; then
-      local trace
-      trace="$(curl -fsS --max-time 12 --socks5-hostname "127.0.0.1:${WARP_PROXY_PORT}" https://www.cloudflare.com/cdn-cgi/trace || true)"
-      if grep -q '^warp=on$' <<<"${trace}"; then
-        ok "WARP本地代理已监听127.0.0.1:${WARP_PROXY_PORT}，warp=on"
-        return
-      fi
-    fi
-    sleep 3
-    elapsed=$((elapsed + 3))
-  done
-  die "WARP本地代理未在60秒内通过warp=on验证。"
+  [[ -n "${WARP_PRIVATE_KEY}" && -n "${WARP_IPV4}" && -n "${WARP_IPV6}" \
+    && -n "${WARP_PEER_PUBLIC_KEY}" && -n "${WARP_ENDPOINT_HOST}" \
+    && "${WARP_ENDPOINT_PORT}" =~ ^[0-9]+$ ]] || die "无法完整解析WARP WireGuard凭据。"
+  ok "WARP凭据已生成；临时注册文件将在脚本退出时清理"
 }
 
 generate_credentials() {
-  say "生成独立凭证"
+  say "生成节点凭证"
   REALITY_DIRECT_UUID="$(sing-box generate uuid)"
   REALITY_WARP_UUID="$(sing-box generate uuid)"
   ARGO_UUID="$(sing-box generate uuid)"
   HY2_PASSWORD="$(openssl rand -hex 24)"
   REALITY_SHORT_ID="$(openssl rand -hex 8)"
   ARGO_WS_PATH="/$(openssl rand -hex 12)"
-  SUBSCRIPTION_PATH="/$(openssl rand -hex 24).yaml"
-
   local key_output
   key_output="$(sing-box generate reality-keypair)"
   REALITY_PRIVATE_KEY="$(awk -F': *' '/PrivateKey|Private key/ {print $2; exit}' <<<"${key_output}")"
   REALITY_PUBLIC_KEY="$(awk -F': *' '/PublicKey|Public key/ {print $2; exit}' <<<"${key_output}")"
-  [[ -n "${REALITY_PRIVATE_KEY}" && -n "${REALITY_PUBLIC_KEY}" ]] \
-    || die "无法解析Reality密钥。"
-
-  ok "四个节点的独立凭证已生成"
+  [[ -n "${REALITY_PRIVATE_KEY}" && -n "${REALITY_PUBLIC_KEY}" ]] || die "无法解析Reality密钥。"
+  ok "节点凭证已生成"
 }
 
 write_sing_box_config() {
   say "写入Sing-box配置"
-  install -d -m 750 /etc/sing-box /var/lib/sing-box/acme
+  install -d -m 700 /etc/sing-box /var/lib/sing-box/acme
   cat >"${SING_BOX_CONFIG}" <<EOF
 {
-  "log": {
-    "level": "warn",
-    "timestamp": true
-  },
+  "log": { "level": "info", "timestamp": true },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "warp-out",
+      "mtu": 1280,
+      "address": ["${WARP_IPV4}", "${WARP_IPV6}"],
+      "private_key": "${WARP_PRIVATE_KEY}",
+      "peers": [
+        {
+          "address": "${WARP_ENDPOINT_HOST}",
+          "port": ${WARP_ENDPOINT_PORT},
+          "public_key": "${WARP_PEER_PUBLIC_KEY}",
+          "allowed_ips": ["0.0.0.0/0", "::/0"],
+          "persistent_keepalive_interval": 30
+        }
+      ]
+    }
+  ],
   "inbounds": [
     {
-      "type": "vless",
-      "tag": "reality-in",
-      "listen": "::",
-      "listen_port": ${REALITY_PORT},
+      "type": "vless", "tag": "reality-in", "listen": "::", "listen_port": ${REALITY_PORT},
       "users": [
-        {
-          "name": "reality-direct",
-          "uuid": "${REALITY_DIRECT_UUID}",
-          "flow": "xtls-rprx-vision"
-        },
-        {
-          "name": "reality-warp",
-          "uuid": "${REALITY_WARP_UUID}",
-          "flow": "xtls-rprx-vision"
-        }
+        { "name": "reality-direct", "uuid": "${REALITY_DIRECT_UUID}", "flow": "xtls-rprx-vision" },
+        { "name": "reality-warp", "uuid": "${REALITY_WARP_UUID}", "flow": "xtls-rprx-vision" }
       ],
       "tls": {
-        "enabled": true,
-        "server_name": "${REALITY_SERVER_NAME}",
+        "enabled": true, "server_name": "${REALITY_SERVER_NAME}",
         "reality": {
           "enabled": true,
-          "handshake": {
-            "server": "${REALITY_SERVER_NAME}",
-            "server_port": 443
-          },
-          "private_key": "${REALITY_PRIVATE_KEY}",
-          "short_id": [
-            "${REALITY_SHORT_ID}"
-          ]
+          "handshake": { "server": "${REALITY_SERVER_NAME}", "server_port": 443 },
+          "private_key": "${REALITY_PRIVATE_KEY}", "short_id": ["${REALITY_SHORT_ID}"]
         }
       }
     },
     {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": ${HY2_PORT},
-      "users": [
-        {
-          "name": "hy2",
-          "password": "${HY2_PASSWORD}"
-        }
-      ],
+      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": ${HY2_PORT},
+      "users": [{ "name": "hy2", "password": "${HY2_PASSWORD}" }],
       "tls": {
         "enabled": true,
         "server_name": "${HY2_DOMAIN}",
-        "certificate_path": "${HY2_CERT_PATH}",
-        "key_path": "${HY2_KEY_PATH}"
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "argo-ws",
-      "listen": "127.0.0.1",
-      "listen_port": ${ARGO_WS_LOCAL_PORT},
-      "users": [
-        {
-          "name": "argo",
-          "uuid": "${ARGO_UUID}"
+        "acme": {
+          "domain": ["${HY2_DOMAIN}"],
+          "data_directory": "/var/lib/sing-box/acme",
+          "email": "${ACME_EMAIL}",
+          "provider": "letsencrypt",
+          "disable_http_challenge": false,
+          "disable_tls_alpn_challenge": true
         }
-      ],
-      "transport": {
-        "type": "ws",
-        "path": "${ARGO_WS_PATH}"
       }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
     },
     {
-      "type": "socks",
-      "tag": "warp-out",
-      "server": "127.0.0.1",
-      "server_port": ${WARP_PROXY_PORT},
-      "version": "5"
+      "type": "vless", "tag": "argo-ws", "listen": "127.0.0.1", "listen_port": ${ARGO_WS_LOCAL_PORT},
+      "users": [{ "name": "argo", "uuid": "${ARGO_UUID}" }],
+      "transport": { "type": "ws", "path": "${ARGO_WS_PATH}" }
+    },
+    {
+      "type": "mixed", "tag": "warp-test", "listen": "127.0.0.1", "listen_port": ${WARP_TEST_PORT}
     }
   ],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
   "route": {
     "rules": [
-      {
-        "action": "sniff"
-      },
-      {
-        "auth_user": [
-          "reality-warp"
-        ],
-        "action": "route",
-        "outbound": "warp-out"
-      },
-      {
-        "protocol": [
-          "bittorrent"
-        ],
-        "action": "reject"
-      }
+      { "action": "sniff" },
+      { "inbound": ["warp-test"], "action": "route", "outbound": "warp-out" },
+      { "auth_user": ["reality-warp"], "action": "route", "outbound": "warp-out" },
+      { "protocol": ["bittorrent"], "action": "reject" }
     ],
     "final": "direct"
   }
 }
 EOF
   chmod 600 "${SING_BOX_CONFIG}"
-  ok "Sing-box配置已写入，等待Caddy签发HY2证书后检查"
+  sing-box check -c "${SING_BOX_CONFIG}" || die "Sing-box配置检查失败。"
+  ok "Sing-box配置检查通过"
 }
 
-write_sing_box_service() {
+write_services() {
+  say "写入系统服务"
   cat >"${SING_BOX_SERVICE}" <<'EOF'
 [Unit]
-Description=Sing-box Five-in-One Proxy Core
-After=network-online.target warp-svc.service caddy.service
+Description=Sing-box Four-in-One Proxy Core
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -492,62 +370,50 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-  chmod 644 "${SING_BOX_SERVICE}"
+
+  install -d -m 700 /etc/cloudflared
+  printf '%s' "${ARGO_TOKEN}" >"${ARGO_TOKEN_FILE}"
+  chmod 600 "${ARGO_TOKEN_FILE}"
+  ARGO_TOKEN=""
+  cat >"${CLOUDFLARED_SERVICE}" <<EOF
+[Unit]
+Description=Cloudflare Tunnel for Sing-box Argo Node
+After=network-online.target sing-box.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${CLOUDFLARED_BIN} tunnel --no-autoupdate --edge-ip-version auto --protocol http2 --url http://127.0.0.1:${ARGO_WS_LOCAL_PORT} run --token-file ${ARGO_TOKEN_FILE}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "${SING_BOX_SERVICE}" "${CLOUDFLARED_SERVICE}"
+  ok "系统服务已写入"
 }
 
-write_clash_profile() {
-  say "生成Clash/Mihomo五节点订阅"
+write_client_files() {
+  say "生成客户端文件"
+  local encoded_path="%2F${ARGO_WS_PATH#/}"
+  REALITY_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality"
+  REALITY_WARP_LINK="vless://${REALITY_WARP_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality-WARP"
+  HY2_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}/?sni=${HY2_DOMAIN}&alpn=h3&insecure=0#VPS-HY2"
+  ARGO_LINK="vless://${ARGO_UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${encoded_path}#VPS-Argo"
+
   cat >"${CLASH_PROFILE}" <<EOF
 mixed-port: 7890
 allow-lan: false
 mode: rule
 log-level: warning
 ipv6: true
-unified-delay: true
-tcp-concurrent: true
-
 proxies:
-  - name: VPS-Reality
-    type: vless
-    server: ${SERVER_IP}
-    port: ${REALITY_PORT}
-    uuid: ${REALITY_DIRECT_UUID}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${REALITY_SERVER_NAME}
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: ${REALITY_PUBLIC_KEY}
-      short-id: ${REALITY_SHORT_ID}
-
-  - name: VPS-Reality-WARP
-    type: vless
-    server: ${SERVER_IP}
-    port: ${REALITY_PORT}
-    uuid: ${REALITY_WARP_UUID}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${REALITY_SERVER_NAME}
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: ${REALITY_PUBLIC_KEY}
-      short-id: ${REALITY_SHORT_ID}
-
-  - name: VPS-HY2
-    type: hysteria2
-    server: ${HY2_DOMAIN}
-    port: ${HY2_PORT}
-    password: ${HY2_PASSWORD}
-    sni: ${HY2_DOMAIN}
-    alpn:
-      - h3
-    skip-cert-verify: false
-    udp: true
-
+  - { name: VPS-Reality, type: vless, server: ${SERVER_IP}, port: 443, uuid: ${REALITY_DIRECT_UUID}, network: tcp, tls: true, udp: true, flow: xtls-rprx-vision, servername: ${REALITY_SERVER_NAME}, client-fingerprint: chrome, reality-opts: { public-key: ${REALITY_PUBLIC_KEY}, short-id: ${REALITY_SHORT_ID} } }
+  - { name: VPS-Reality-WARP, type: vless, server: ${SERVER_IP}, port: 443, uuid: ${REALITY_WARP_UUID}, network: tcp, tls: true, udp: true, flow: xtls-rprx-vision, servername: ${REALITY_SERVER_NAME}, client-fingerprint: chrome, reality-opts: { public-key: ${REALITY_PUBLIC_KEY}, short-id: ${REALITY_SHORT_ID} } }
+  - { name: VPS-HY2, type: hysteria2, server: ${HY2_DOMAIN}, port: 443, password: ${HY2_PASSWORD}, sni: ${HY2_DOMAIN}, alpn: [h3], skip-cert-verify: false, udp: true }
   - name: VPS-Argo
     type: vless
     server: ${ARGO_DOMAIN}
@@ -558,388 +424,127 @@ proxies:
     udp: true
     servername: ${ARGO_DOMAIN}
     client-fingerprint: chrome
-    ws-opts:
-      path: ${ARGO_WS_PATH}
-      headers:
-        Host: ${ARGO_DOMAIN}
-
+    ws-opts: { path: "${ARGO_WS_PATH}", headers: { Host: ${ARGO_DOMAIN} } }
 proxy-groups:
-  - name: PROXY
-    type: select
-    proxies:
-      - VPS-Reality
-      - VPS-Reality-WARP
-      - VPS-HY2
-      - VPS-Argo
-      - DIRECT
-
+  - { name: PROXY, type: select, proxies: [VPS-Reality, VPS-Reality-WARP, VPS-HY2, VPS-Argo, DIRECT] }
 rules:
   - MATCH,PROXY
 EOF
-  chmod 600 "${CLASH_PROFILE}"
-  ok "四节点订阅已生成"
-}
-
-write_caddy_config() {
-  say "写入Caddy配置"
-  install -d -o root -g caddy -m 750 "${SUBSCRIPTION_DIR}"
-  install -o root -g caddy -m 640 \
-    "${CLASH_PROFILE}" "${SUBSCRIPTION_DIR}${SUBSCRIPTION_PATH}"
-
-  {
-    if [[ -n "${ACME_EMAIL}" ]]; then
-      printf '{\n\temail %s\n}\n\n' "${ACME_EMAIL}"
-    fi
-    cat <<EOF
-http://:${ARGO_CADDY_LOCAL_PORT} {
-	bind 127.0.0.1
-	@subscription path ${SUBSCRIPTION_PATH}
-	handle @subscription {
-		header Cache-Control "no-store"
-		header Content-Type "text/yaml; charset=utf-8"
-		root * ${SUBSCRIPTION_DIR}
-		file_server
-	}
-
-	@argo_websocket path ${ARGO_WS_PATH}
-	handle @argo_websocket {
-		reverse_proxy 127.0.0.1:${ARGO_WS_LOCAL_PORT}
-	}
-
-	handle {
-		respond 404
-	}
-}
-
-https://${HY2_DOMAIN}:${HY2_CERT_LOCAL_PORT} {
-	bind 127.0.0.1
-	tls {
-		issuer acme {
-			dir https://acme-v02.api.letsencrypt.org/directory
-		}
-	}
-	respond 404
-}
-EOF
-  } >"${CADDY_CONFIG}"
-  chown root:caddy "${CADDY_CONFIG}"
-  chmod 640 "${CADDY_CONFIG}"
-  caddy validate --config "${CADDY_CONFIG}" --adapter caddyfile \
-    || die "Caddy配置检查失败。"
-  ok "Caddy配置检查通过"
-}
-
-write_cloudflared_service() {
-  say "配置Argo固定隧道"
-  install -d -m 700 /etc/cloudflared
-  printf '%s' "${ARGO_TOKEN}" >"${ARGO_TOKEN_FILE}"
-  chmod 600 "${ARGO_TOKEN_FILE}"
-  ARGO_TOKEN=""
-
-  cat >"${CLOUDFLARED_SERVICE}" <<EOF
-[Unit]
-Description=Cloudflare Tunnel for Sing-box Argo Node
-After=network-online.target sing-box.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=${CLOUDFLARED_BIN} tunnel --no-autoupdate --edge-ip-version auto --protocol http2 run --token-file ${ARGO_TOKEN_FILE}
-Restart=on-failure
-RestartSec=5s
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  chmod 644 "${CLOUDFLARED_SERVICE}"
-  ok "Argo Token已写入受保护文件，未写入服务命令行"
-}
-
-configure_firewall() {
-  say "检查防火墙"
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-    ufw allow 80/tcp >/dev/null
-    ufw allow "${REALITY_PORT}/tcp" >/dev/null
-    ufw allow "${HY2_PORT}/udp" >/dev/null
-    ok "UFW已精确放行TCP 80/443和UDP 443"
-    return
-  fi
-  warn "未自动修改nftables或云防火墙；请确认TCP 80/443和UDP 443已放行。"
-}
-
-wait_for_hy2_certificate() {
-  printf '等待Caddy签发HY2证书，最长%s秒' "${CERT_WAIT_SECONDS}"
-  local elapsed=0
-  while (( elapsed < CERT_WAIT_SECONDS )); do
-    if [[ -s "${HY2_CERT_PATH}" && -s "${HY2_KEY_PATH}" ]]; then
-      printf '\n'
-      ok "Caddy已签发HY2证书"
-      return
-    fi
-    printf '.'
-    sleep 5
-    elapsed=$((elapsed + 5))
-  done
-  printf '\n'
-  journalctl -u caddy -n 80 --no-pager >&2 || true
-  die "Caddy未在限定时间内签发HY2证书。"
-}
-
-start_services() {
-  say "启动服务"
-  systemctl daemon-reload
-  systemctl enable --now caddy >/dev/null
-  wait_for_hy2_certificate
-  sing-box check -c "${SING_BOX_CONFIG}" || die "Sing-box配置检查失败。"
-  systemctl enable --now sing-box >/dev/null
-  systemctl enable --now cloudflared-argo >/dev/null
-
-  local service_name
-  for service_name in caddy sing-box cloudflared-argo warp-svc; do
-    if ! systemctl is-active --quiet "${service_name}"; then
-      journalctl -u "${service_name}" -n 80 --no-pager >&2 || true
-      die "服务 ${service_name} 启动失败。"
-    fi
-  done
-  ok "Sing-box、Caddy、cloudflared和WARP均已运行并开机自启"
-}
-
-verify_websocket() {
-  local url="$1"
-  local host="$2"
-  local resolve_value="${3:-}"
-  local args=(
-    -sS --http1.1 --max-time 12
-    -H 'Connection: Upgrade'
-    -H 'Upgrade: websocket'
-    -H 'Sec-WebSocket-Version: 13'
-    -H 'Sec-WebSocket-Key: SGVsbG9Xb3JsZDEyMzQ1Ng=='
-    -H "Host: ${host}"
-    -o /dev/null -w '%{http_code}'
-  )
-  if [[ -n "${resolve_value}" ]]; then
-    args+=(--resolve "${resolve_value}")
-  fi
-  curl "${args[@]}" "${url}" 2>/dev/null || true
-}
-
-verify_runtime() {
-  say "验证四条路线的服务端链路"
-  port_is_listening "${REALITY_PORT}" || die "Reality没有监听TCP 443。"
-  udp_port_is_listening "${HY2_PORT}" || die "HY2没有监听UDP 443。"
-  ss -H -ltn "sport = :${ARGO_WS_LOCAL_PORT}" | grep -q '127.0.0.1' \
-    || die "Argo WebSocket未仅监听127.0.0.1。"
-  ss -H -ltn "sport = :${ARGO_CADDY_LOCAL_PORT}" | grep -q '127.0.0.1' \
-    || die "Caddy Argo入口未仅监听127.0.0.1。"
-
-  local argo_code
-  argo_code="$(verify_websocket \
-    "https://${ARGO_DOMAIN}${ARGO_WS_PATH}" \
-    "${ARGO_DOMAIN}")"
-  [[ "${argo_code}" == "101" ]] || die "Argo WebSocket未返回HTTP 101（实际${argo_code:-无响应}）。请核对Tunnel公共主机名的服务地址。"
-
-  local downloaded_profile="${TEMP_DIR}/downloaded-profile.yaml"
-  curl -fsS --max-time 10 \
-    "https://${ARGO_DOMAIN}${SUBSCRIPTION_PATH}" \
-    -o "${downloaded_profile}"
-  cmp -s "${CLASH_PROFILE}" "${downloaded_profile}" \
-    || die "HTTPS订阅内容与本地配置不一致。"
-
-  local warp_trace
-  warp_trace="$(curl -fsS --max-time 12 --socks5-hostname "127.0.0.1:${WARP_PROXY_PORT}" https://www.cloudflare.com/cdn-cgi/trace)"
-  grep -q '^warp=on$' <<<"${warp_trace}" || die "WARP出口没有返回warp=on。"
-  ok "Reality监听、HY2监听、Argo HTTP 101、订阅一致性和WARP出口均通过"
-}
-
-write_client_info() {
-  say "保存客户端信息"
-  local encoded_argo_path subscription_url
-  encoded_argo_path="%2F${ARGO_WS_PATH#/}"
-  subscription_url="https://${ARGO_DOMAIN}${SUBSCRIPTION_PATH}"
-
-  local reality_link reality_warp_link hy2_link argo_link
-  reality_link="vless://${REALITY_DIRECT_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality"
-  reality_warp_link="vless://${REALITY_WARP_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality-WARP"
-  hy2_link="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}/?sni=${HY2_DOMAIN}&alpn=h3&insecure=0#VPS-HY2"
-  argo_link="vless://${ARGO_UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${encoded_argo_path}#VPS-Argo"
 
   cat >"${RESULT_FILE}" <<EOF
 Sing-box四合一客户端信息
 生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
 【Reality直连】
-${reality_link}
+${REALITY_LINK}
 
 【Reality-WARP】
-${reality_warp_link}
+${REALITY_WARP_LINK}
 
 【Hysteria 2】
-${hy2_link}
+${HY2_LINK}
 
 【Argo固定隧道】
-${argo_link}
+${ARGO_LINK}
 
-【Clash Verge / Mihomo统一订阅】
-${subscription_url}
+【Clash Verge / Mihomo本地配置】
+${CLASH_PROFILE}
 
-重要：本文件、节点链接、订阅地址和Argo Token均为秘密，不要公开。
+以上内容均为秘密，不要公开。
 EOF
-  chmod 600 "${RESULT_FILE}"
-
-  printf '\n%s部署与服务端验证完成。%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
-  printf '客户端信息：%s\n' "${RESULT_FILE}"
-  printf 'Clash订阅：%s\n' "${subscription_url}"
-  printf '下一步：从实际客户端逐个测试四个节点。\n'
-  printf 'HY2域名%s必须始终保持灰云。\n' "${HY2_DOMAIN}"
+  chmod 600 "${CLASH_PROFILE}" "${RESULT_FILE}"
+  ok "客户端文件已生成"
 }
 
-finish_after_warp_install() {
-  generate_credentials
-  write_sing_box_config
-  write_sing_box_service
-  write_clash_profile
-  write_caddy_config
-  write_cloudflared_service
-  configure_firewall
-  start_services
-  verify_runtime
-  write_client_info
+configure_firewall() {
+  say "检查防火墙"
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ufw allow 443/udp >/dev/null
+    ok "UFW已放行TCP 80/443和UDP 443"
+  else
+    warn "未修改云防火墙或nftables；请确认TCP 80/443和UDP 443已放行。"
+  fi
 }
 
-migrate_current_to_four_in_one() {
-  require_root
-  require_debian
-  command -v jq >/dev/null 2>&1 && command -v caddy >/dev/null 2>&1 \
-    || die "迁移需要现有jq和Caddy。"
-  [[ -f "${SING_BOX_CONFIG}" && -f "${CLASH_PROFILE}" && -f "${CADDY_CONFIG}" ]] \
-    || die "没有找到完整的五合一配置，拒绝迁移。"
-  jq -e '.inbounds[] | select(.tag == "cdn-ws")' "${SING_BOX_CONFIG}" >/dev/null \
-    || die "没有找到旧CDN入站，当前配置不属于可迁移的五合一版本。"
-  jq -e '.inbounds[] | select(.tag == "argo-ws")' "${SING_BOX_CONFIG}" >/dev/null \
-    || die "没有找到Argo入站，拒绝迁移。"
-
-  HY2_DOMAIN="$(jq -r '.inbounds[] | select(.tag == "hy2-in").tls.server_name' "${SING_BOX_CONFIG}")"
-  ARGO_DOMAIN="$(awk '/name: VPS-Argo/{found=1} found && /server:/{print $2; exit}' "${CLASH_PROFILE}")"
-  ARGO_WS_PATH="$(jq -r '.inbounds[] | select(.tag == "argo-ws").transport.path' "${SING_BOX_CONFIG}")"
-  SUBSCRIPTION_PATH="$(awk '/@subscription path /{print $3; exit}' "${CADDY_CONFIG}")"
-  valid_domain "${HY2_DOMAIN}" && valid_domain "${ARGO_DOMAIN}" \
-    || die "无法从旧配置解析HY2或Argo域名。"
-  [[ "${ARGO_WS_PATH}" == /* && "${SUBSCRIPTION_PATH}" == /* ]] \
-    || die "无法从旧配置解析Argo或订阅路径。"
-  HY2_CERT_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.crt"
-  HY2_KEY_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.key"
-  [[ -s "${HY2_CERT_PATH}" && -s "${HY2_KEY_PATH}" ]] \
-    || die "现有HY2证书文件不存在，拒绝迁移。"
-
-  local stamp tmp_config tmp_profile
-  stamp="$(date +%Y%m%d-%H%M%S)"
-  TEMP_DIR="$(mktemp -d)"
-  tmp_config="${TEMP_DIR}/config.json"
-  tmp_profile="${TEMP_DIR}/clash-verge.yaml"
-  cp -p "${SING_BOX_CONFIG}" "${SING_BOX_CONFIG}.before-four-in-one-${stamp}"
-  cp -p "${CLASH_PROFILE}" "${CLASH_PROFILE}.before-four-in-one-${stamp}"
-  cp -p "${CADDY_CONFIG}" "${CADDY_CONFIG}.before-four-in-one-${stamp}"
-
-  jq '.inbounds |= map(select(.tag != "cdn-ws"))' "${SING_BOX_CONFIG}" >"${tmp_config}"
-  awk '
-    /^  - name: VPS-CF-CDN$/ {skip=1; next}
-    skip && /^  - name:/ {skip=0}
-    skip {next}
-    $0 == "      - VPS-CF-CDN" {next}
-    {print}
-  ' "${CLASH_PROFILE}" >"${tmp_profile}"
-  sing-box check -c "${tmp_config}" || die "迁移后的Sing-box配置检查失败。"
-  grep -q 'VPS-CF-CDN' "${tmp_profile}" && die "迁移后的订阅仍包含CDN节点。"
-
-  install -m 600 "${tmp_config}" "${SING_BOX_CONFIG}"
-  install -m 600 "${tmp_profile}" "${CLASH_PROFILE}"
-  write_caddy_config
-  systemctl reload caddy
-  systemctl restart sing-box
-  systemctl is-active --quiet caddy && systemctl is-active --quiet sing-box \
-    || die "迁移后Caddy或Sing-box未正常运行。"
-
-  local local_ws_code
-  local_ws_code="$(verify_websocket \
-    "http://127.0.0.1:${ARGO_CADDY_LOCAL_PORT}${ARGO_WS_PATH}" "${ARGO_DOMAIN}")"
-  [[ "${local_ws_code}" == "101" ]] || die "本机Argo分流未返回HTTP 101。"
-  curl -fsS --max-time 5 \
-    -H "Host: ${ARGO_DOMAIN}" \
-    "http://127.0.0.1:${ARGO_CADDY_LOCAL_PORT}${SUBSCRIPTION_PATH}" \
-    -o "${TEMP_DIR}/profile.yaml"
-  cmp -s "${CLASH_PROFILE}" "${TEMP_DIR}/profile.yaml" \
-    || die "本机Argo订阅内容不一致。"
-  ok "当前VPS已迁移为四合一，本机Argo分流和订阅均通过"
-  printf '现在把Cloudflare Tunnel服务地址改为 http://localhost:%s，再验证公网Argo和订阅。\n' "${ARGO_CADDY_LOCAL_PORT}"
+wait_for_certificate() {
+  printf '等待Sing-box签发HY2证书，最长%s秒' "${CERT_WAIT_SECONDS}"
+  local elapsed=0
+  while (( elapsed < CERT_WAIT_SECONDS )); do
+    if journalctl -u sing-box --since "${CERT_WAIT_SECONDS} seconds ago" --no-pager 2>/dev/null \
+      | grep -q 'certificate obtained successfully'; then
+      printf '\n'; ok "HY2证书已签发"; return
+    fi
+    systemctl is-active --quiet sing-box || break
+    printf '.'; sleep 5; elapsed=$((elapsed + 5))
+  done
+  printf '\n'; journalctl -u sing-box -n 100 --no-pager >&2 || true
+  die "Sing-box未在限定时间内签发HY2证书。请检查TCP 80和HY2灰云DNS。"
 }
 
-resume_after_warp_failure() {
-  require_root
-  require_debian
-
-  command -v sing-box >/dev/null 2>&1 \
-    && command -v caddy >/dev/null 2>&1 \
-    && command -v cloudflared >/dev/null 2>&1 \
-    || die "续跑条件不满足：前七步并未完整安装。"
-  [[ ! -f "${SING_BOX_CONFIG}" && ! -f "${CLOUDFLARED_SERVICE}" ]] \
-    || die "检测到五合一配置或服务已经生成，不能使用第8步专用续跑模式。"
-
-  read_inputs
-  TEMP_DIR="$(mktemp -d)"
-  detect_public_ip_and_dns
-  install_warp
-  finish_after_warp_install
+wait_for_routes() {
+  printf '等待WARP和Argo链路就绪，最长%s秒' "${ROUTE_WAIT_SECONDS}"
+  local elapsed=0 trace="" argo_code=""
+  local warp_ready=false argo_ready=false
+  while (( elapsed < ROUTE_WAIT_SECONDS )); do
+    if [[ "${warp_ready}" == false ]]; then
+      trace="$(curl -fsS --max-time 8 --socks5-hostname "127.0.0.1:${WARP_TEST_PORT}" \
+        https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+      grep -q '^warp=on$' <<<"${trace}" && warp_ready=true
+    fi
+    if [[ "${argo_ready}" == false ]]; then
+      argo_code="$(curl -sS --http1.1 --max-time 8 -o /dev/null -w '%{http_code}' \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+        -H 'Sec-WebSocket-Key: SGVsbG9Xb3JsZDEyMzQ1Ng==' \
+        "https://${ARGO_DOMAIN}${ARGO_WS_PATH}" 2>/dev/null || true)"
+      [[ "${argo_code}" == "101" ]] && argo_ready=true
+    fi
+    if [[ "${warp_ready}" == true && "${argo_ready}" == true ]]; then
+      printf '\n'; ok "WARP和Argo链路已就绪"; return
+    fi
+    printf '.'; sleep 3; elapsed=$((elapsed + 3))
+  done
+  printf '\n'
+  [[ "${warp_ready}" == true ]] || die "Sing-box内置WARP出口未返回warp=on。"
+  die "Argo WebSocket未返回HTTP 101（实际${argo_code:-无响应}）。请将Tunnel服务地址设为http://localhost:${ARGO_WS_LOCAL_PORT}。"
 }
 
-resume_after_sing_box_config_failure() {
-  require_root
-  require_debian
-  command -v sing-box >/dev/null 2>&1 \
-    && command -v caddy >/dev/null 2>&1 \
-    && command -v cloudflared >/dev/null 2>&1 \
-    && command -v warp-cli >/dev/null 2>&1 \
-    || die "续跑条件不满足：前置组件并未完整安装。"
-  [[ -f "${SING_BOX_CONFIG}" && ! -f "${SING_BOX_SERVICE}" ]] \
-    || die "当前状态不属于第10步证书检查失败，拒绝专用续跑。"
-
-  read_inputs
-  TEMP_DIR="$(mktemp -d)"
-  detect_public_ip_and_dns
-  generate_credentials
-  finish_after_warp_install
+start_and_verify() {
+  say "启动并验证服务"
+  systemctl daemon-reload
+  systemctl enable --now sing-box >/dev/null
+  wait_for_certificate
+  systemctl enable --now cloudflared-argo >/dev/null
+  systemctl is-active --quiet sing-box || die "Sing-box启动失败。"
+  systemctl is-active --quiet cloudflared-argo || die "cloudflared启动失败。"
+  port_is_listening "${REALITY_PORT}" || die "Reality没有监听TCP 443。"
+  udp_port_is_listening "${HY2_PORT}" || die "HY2没有监听UDP 443。"
+  ss -H -ltn "sport = :${ARGO_WS_LOCAL_PORT}" | grep -q '127.0.0.1' || die "Argo入口未监听本机端口。"
+  wait_for_routes
+  ok "Reality、HY2、Argo和Sing-box内置WARP均通过验证"
 }
 
 main() {
-  if [[ "${1:-}" == "--resume-after-sing-box-config" ]]; then
-    resume_after_sing_box_config_failure
-    return
-  fi
-  if [[ "${1:-}" == "--migrate-current-to-four-in-one" ]]; then
-    migrate_current_to_four_in_one
-    return
-  fi
-  if [[ "${1:-}" == "--resume-after-warp" ]]; then
-    resume_after_warp_failure
-    return
-  fi
-  [[ $# -eq 0 ]] || die "未知参数：${1}"
-
+  [[ $# -eq 0 ]] || die "不支持参数：${1}"
   require_root
   require_debian
   refuse_existing_installation
   read_inputs
   TEMP_DIR="$(mktemp -d)"
-
   install_base_packages
   enable_bbr
   detect_public_ip_and_dns
   install_sing_box
-  install_caddy
   install_cloudflared
-  install_warp
-  finish_after_warp_install
+  generate_warp_profile
+  generate_credentials
+  write_sing_box_config
+  write_services
+  write_client_files
+  configure_firewall
+  start_and_verify
+  printf '\n%s部署完成。%s\n客户端信息：%s\nClash配置：%s\n' "${GREEN}" "${RESET}" "${RESULT_FILE}" "${CLASH_PROFILE}"
 }
 
 main "$@"
