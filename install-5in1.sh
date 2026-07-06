@@ -4,12 +4,11 @@
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh)
 #
-# 五个客户端节点：
+# 四个客户端节点：
 #   1. VLESS + Reality，VPS原生出口
 #   2. VLESS + Reality，Cloudflare WARP出口
 #   3. Hysteria 2
-#   4. VLESS + WebSocket + Cloudflare CDN
-#   5. VLESS + WebSocket + Cloudflare Tunnel（Argo）
+#   4. VLESS + WebSocket + Cloudflare Tunnel（Argo）
 #
 # 唯一代理内核为 Sing-box。Caddy、cloudflared 和官方 WARP 客户端只承担辅助职责。
 # 脚本只面向空白服务器；发现已有部署或端口冲突时立即停止，不覆盖、不卸载。
@@ -37,9 +36,9 @@ readonly SUBSCRIPTION_DIR="/var/lib/caddy/subscriptions"
 
 readonly REALITY_PORT="443"
 readonly HY2_PORT="443"
-readonly CDN_PORT="8443"
-readonly CDN_WS_LOCAL_PORT="10000"
 readonly ARGO_WS_LOCAL_PORT="10001"
+readonly ARGO_CADDY_LOCAL_PORT="10002"
+readonly HY2_CERT_LOCAL_PORT="10003"
 readonly WARP_PROXY_PORT="40000"
 readonly REALITY_TARGET="www.debian.org:443"
 readonly REALITY_SERVER_NAME="www.debian.org"
@@ -48,12 +47,12 @@ readonly CERT_WAIT_SECONDS="180"
 TEMP_DIR=""
 STEP_NO=0
 SERVER_IP=""
-CDN_DOMAIN=""
 HY2_DOMAIN=""
 ARGO_DOMAIN=""
 ARGO_TOKEN=""
 ACME_EMAIL=""
-ACME_ALT_PORT=""
+HY2_CERT_PATH=""
+HY2_KEY_PATH=""
 
 if [[ -t 1 ]]; then
   readonly COLOR_GREEN=$'\033[1;32m'
@@ -155,7 +154,7 @@ refuse_existing_installation() {
   done
 
   local tcp_port
-  for tcp_port in 80 "${REALITY_PORT}" "${CDN_PORT}" "${CDN_WS_LOCAL_PORT}" "${ARGO_WS_LOCAL_PORT}" "${WARP_PROXY_PORT}"; do
+  for tcp_port in 80 "${REALITY_PORT}" "${ARGO_WS_LOCAL_PORT}" "${ARGO_CADDY_LOCAL_PORT}" "${HY2_CERT_LOCAL_PORT}" "${WARP_PROXY_PORT}"; do
     port_is_listening "${tcp_port}" && die "TCP端口 ${tcp_port} 已被占用。"
   done
   udp_port_is_listening "${HY2_PORT}" && die "UDP端口 ${HY2_PORT} 已被占用。"
@@ -168,26 +167,22 @@ valid_domain() {
 }
 
 read_inputs() {
-  printf '\n%sSing-box 五合一部署%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '准备三个Cloudflare子域名：\n'
-  printf '  1. CDN域名：部署时灰云，证书成功后切橙云。\n'
-  printf '  2. HY2域名：始终灰云。\n'
-  printf '  3. Argo域名：已绑定固定Tunnel，服务地址设为 http://localhost:%s。\n' "${ARGO_WS_LOCAL_PORT}"
-
-  read -r -p "CDN完整域名: " CDN_DOMAIN
-  CDN_DOMAIN="${CDN_DOMAIN,,}"
-  valid_domain "${CDN_DOMAIN}" || die "CDN域名格式不正确。"
+  printf '\n%sSing-box 四合一部署%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+  printf '准备两个Cloudflare子域名：\n'
+  printf '  1. HY2域名：始终灰云。\n'
+  printf '  2. Argo域名：固定Tunnel服务地址设为 http://localhost:%s。\n' "${ARGO_CADDY_LOCAL_PORT}"
 
   read -r -p "HY2完整域名: " HY2_DOMAIN
   HY2_DOMAIN="${HY2_DOMAIN,,}"
   valid_domain "${HY2_DOMAIN}" || die "HY2域名格式不正确。"
+  HY2_CERT_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.crt"
+  HY2_KEY_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.key"
 
   read -r -p "Argo固定域名: " ARGO_DOMAIN
   ARGO_DOMAIN="${ARGO_DOMAIN,,}"
   valid_domain "${ARGO_DOMAIN}" || die "Argo域名格式不正确。"
 
-  [[ "${CDN_DOMAIN}" != "${HY2_DOMAIN}" && "${CDN_DOMAIN}" != "${ARGO_DOMAIN}" && "${HY2_DOMAIN}" != "${ARGO_DOMAIN}" ]] \
-    || die "三个用途必须使用不同子域名。"
+  [[ "${HY2_DOMAIN}" != "${ARGO_DOMAIN}" ]] || die "两个用途必须使用不同子域名。"
 
   read -r -s -p "Argo Tunnel Token（输入时不会显示）: " ARGO_TOKEN
   printf '\n'
@@ -202,8 +197,7 @@ read_inputs() {
   printf '\n即将部署：\n'
   printf '  Reality直连和WARP：TCP 443，目标 %s\n' "${REALITY_TARGET}"
   printf '  HY2：%s UDP 443\n' "${HY2_DOMAIN}"
-  printf '  CDN：%s TCP 8443\n' "${CDN_DOMAIN}"
-  printf '  Argo：%s → 本机 %s\n' "${ARGO_DOMAIN}" "${ARGO_WS_LOCAL_PORT}"
+  printf '  Argo及订阅：%s → Caddy本机端口 %s\n' "${ARGO_DOMAIN}" "${ARGO_CADDY_LOCAL_PORT}"
   read -r -p "确认DNS和Tunnel设置无误后输入 DEPLOY: " confirmation
   [[ "${confirmation}" == "DEPLOY" ]] || die "用户取消。"
 }
@@ -235,7 +229,7 @@ detect_public_ip_and_dns() {
     || die "无法取得VPS公网IPv4。"
 
   local domain
-  for domain in "${CDN_DOMAIN}" "${HY2_DOMAIN}"; do
+  for domain in "${HY2_DOMAIN}"; do
     mapfile -t domain_ips < <(
       dig +short A "${domain}" |
         grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' |
@@ -245,7 +239,7 @@ detect_public_ip_and_dns() {
     printf '%s\n' "${domain_ips[@]}" | grep -Fxq "${SERVER_IP}" \
       || die "${domain} 未以灰云方式解析到当前VPS ${SERVER_IP}。"
   done
-  ok "CDN和HY2域名均以灰云指向当前VPS"
+  ok "HY2域名以灰云指向当前VPS"
 }
 
 architecture_values() {
@@ -345,11 +339,9 @@ generate_credentials() {
   say "生成独立凭证"
   REALITY_DIRECT_UUID="$(sing-box generate uuid)"
   REALITY_WARP_UUID="$(sing-box generate uuid)"
-  CDN_UUID="$(sing-box generate uuid)"
   ARGO_UUID="$(sing-box generate uuid)"
   HY2_PASSWORD="$(openssl rand -hex 24)"
   REALITY_SHORT_ID="$(openssl rand -hex 8)"
-  CDN_WS_PATH="/$(openssl rand -hex 12)"
   ARGO_WS_PATH="/$(openssl rand -hex 12)"
   SUBSCRIPTION_PATH="/$(openssl rand -hex 24).yaml"
 
@@ -360,11 +352,7 @@ generate_credentials() {
   [[ -n "${REALITY_PRIVATE_KEY}" && -n "${REALITY_PUBLIC_KEY}" ]] \
     || die "无法解析Reality密钥。"
 
-  ACME_ALT_PORT="$((20000 + RANDOM % 10000))"
-  while port_is_listening "${ACME_ALT_PORT}"; do
-    ACME_ALT_PORT="$((20000 + RANDOM % 10000))"
-  done
-  ok "五个节点的独立凭证已生成"
+  ok "四个节点的独立凭证已生成"
 }
 
 write_sing_box_config() {
@@ -424,32 +412,8 @@ write_sing_box_config() {
       "tls": {
         "enabled": true,
         "server_name": "${HY2_DOMAIN}",
-        "acme": {
-          "domain": [
-            "${HY2_DOMAIN}"
-          ],
-          "data_directory": "/var/lib/sing-box/acme",
-          "email": "${ACME_EMAIL}",
-          "provider": "letsencrypt",
-          "disable_tls_alpn_challenge": true,
-          "alternative_http_port": ${ACME_ALT_PORT}
-        }
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "cdn-ws",
-      "listen": "127.0.0.1",
-      "listen_port": ${CDN_WS_LOCAL_PORT},
-      "users": [
-        {
-          "name": "cdn",
-          "uuid": "${CDN_UUID}"
-        }
-      ],
-      "transport": {
-        "type": "ws",
-        "path": "${CDN_WS_PATH}"
+        "certificate_path": "${HY2_CERT_PATH}",
+        "key_path": "${HY2_KEY_PATH}"
       }
     },
     {
@@ -585,21 +549,6 @@ proxies:
     skip-cert-verify: false
     udp: true
 
-  - name: VPS-CF-CDN
-    type: vless
-    server: ${CDN_DOMAIN}
-    port: ${CDN_PORT}
-    uuid: ${CDN_UUID}
-    network: ws
-    tls: true
-    udp: true
-    servername: ${CDN_DOMAIN}
-    client-fingerprint: chrome
-    ws-opts:
-      path: ${CDN_WS_PATH}
-      headers:
-        Host: ${CDN_DOMAIN}
-
   - name: VPS-Argo
     type: vless
     server: ${ARGO_DOMAIN}
@@ -622,7 +571,6 @@ proxy-groups:
       - VPS-Reality
       - VPS-Reality-WARP
       - VPS-HY2
-      - VPS-CF-CDN
       - VPS-Argo
       - DIRECT
 
@@ -630,7 +578,7 @@ rules:
   - MATCH,PROXY
 EOF
   chmod 600 "${CLASH_PROFILE}"
-  ok "五节点订阅已生成，CDN初始server使用自己的域名"
+  ok "四节点订阅已生成"
 }
 
 write_caddy_config() {
@@ -644,7 +592,8 @@ write_caddy_config() {
       printf '{\n\temail %s\n}\n\n' "${ACME_EMAIL}"
     fi
     cat <<EOF
-${CDN_DOMAIN}:${CDN_PORT} {
+http://:${ARGO_CADDY_LOCAL_PORT} {
+	bind 127.0.0.1
 	@subscription path ${SUBSCRIPTION_PATH}
 	handle @subscription {
 		header Cache-Control "no-store"
@@ -653,9 +602,9 @@ ${CDN_DOMAIN}:${CDN_PORT} {
 		file_server
 	}
 
-	@cdn_websocket path ${CDN_WS_PATH}
-	handle @cdn_websocket {
-		reverse_proxy 127.0.0.1:${CDN_WS_LOCAL_PORT}
+	@argo_websocket path ${ARGO_WS_PATH}
+	handle @argo_websocket {
+		reverse_proxy 127.0.0.1:${ARGO_WS_LOCAL_PORT}
 	}
 
 	handle {
@@ -663,14 +612,14 @@ ${CDN_DOMAIN}:${CDN_PORT} {
 	}
 }
 
-http://${HY2_DOMAIN} {
-	@hy2_acme path /.well-known/acme-challenge/*
-	handle @hy2_acme {
-		reverse_proxy 127.0.0.1:${ACME_ALT_PORT}
+https://${HY2_DOMAIN}:${HY2_CERT_LOCAL_PORT} {
+	bind 127.0.0.1
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+		}
 	}
-	handle {
-		respond 404
-	}
+	respond 404
 }
 EOF
   } >"${CADDY_CONFIG}"
@@ -714,18 +663,36 @@ configure_firewall() {
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 80/tcp >/dev/null
     ufw allow "${REALITY_PORT}/tcp" >/dev/null
-    ufw allow "${CDN_PORT}/tcp" >/dev/null
     ufw allow "${HY2_PORT}/udp" >/dev/null
-    ok "UFW已精确放行TCP 80/443/8443和UDP 443"
+    ok "UFW已精确放行TCP 80/443和UDP 443"
     return
   fi
-  warn "未自动修改nftables或云防火墙；请确认TCP 80/443/8443和UDP 443已放行。"
+  warn "未自动修改nftables或云防火墙；请确认TCP 80/443和UDP 443已放行。"
+}
+
+wait_for_hy2_certificate() {
+  printf '等待Caddy签发HY2证书，最长%s秒' "${CERT_WAIT_SECONDS}"
+  local elapsed=0
+  while (( elapsed < CERT_WAIT_SECONDS )); do
+    if [[ -s "${HY2_CERT_PATH}" && -s "${HY2_KEY_PATH}" ]]; then
+      printf '\n'
+      ok "Caddy已签发HY2证书"
+      return
+    fi
+    printf '.'
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  printf '\n'
+  journalctl -u caddy -n 80 --no-pager >&2 || true
+  die "Caddy未在限定时间内签发HY2证书。"
 }
 
 start_services() {
   say "启动服务"
   systemctl daemon-reload
   systemctl enable --now caddy >/dev/null
+  wait_for_hy2_certificate
   systemctl enable --now sing-box >/dev/null
   systemctl enable --now cloudflared-argo >/dev/null
 
@@ -759,38 +726,13 @@ verify_websocket() {
 }
 
 verify_runtime() {
-  say "验证五条路线的服务端链路"
+  say "验证四条路线的服务端链路"
   port_is_listening "${REALITY_PORT}" || die "Reality没有监听TCP 443。"
   udp_port_is_listening "${HY2_PORT}" || die "HY2没有监听UDP 443。"
-  port_is_listening "${CDN_PORT}" || die "Caddy没有监听TCP 8443。"
-  ss -H -ltn "sport = :${CDN_WS_LOCAL_PORT}" | grep -q '127.0.0.1' \
-    || die "CDN WebSocket未仅监听127.0.0.1。"
   ss -H -ltn "sport = :${ARGO_WS_LOCAL_PORT}" | grep -q '127.0.0.1' \
     || die "Argo WebSocket未仅监听127.0.0.1。"
-
-  printf '等待CDN和HY2证书，最长%s秒' "${CERT_WAIT_SECONDS}"
-  local elapsed=0
-  local cdn_ready=false
-  while (( elapsed < CERT_WAIT_SECONDS )); do
-    if curl -sS --max-time 8 \
-      --resolve "${CDN_DOMAIN}:${CDN_PORT}:127.0.0.1" \
-      "https://${CDN_DOMAIN}:${CDN_PORT}/" -o /dev/null 2>/dev/null; then
-      cdn_ready=true
-      break
-    fi
-    printf '.'
-    sleep 5
-    elapsed=$((elapsed + 5))
-  done
-  printf '\n'
-  [[ "${cdn_ready}" == true ]] || die "CDN证书未在限定时间内就绪。"
-
-  local cdn_code
-  cdn_code="$(verify_websocket \
-    "https://${CDN_DOMAIN}:${CDN_PORT}${CDN_WS_PATH}" \
-    "${CDN_DOMAIN}" \
-    "${CDN_DOMAIN}:${CDN_PORT}:127.0.0.1")"
-  [[ "${cdn_code}" == "101" ]] || die "CDN WebSocket未返回HTTP 101（实际${cdn_code:-无响应}）。"
+  ss -H -ltn "sport = :${ARGO_CADDY_LOCAL_PORT}" | grep -q '127.0.0.1' \
+    || die "Caddy Argo入口未仅监听127.0.0.1。"
 
   local argo_code
   argo_code="$(verify_websocket \
@@ -800,8 +742,7 @@ verify_runtime() {
 
   local downloaded_profile="${TEMP_DIR}/downloaded-profile.yaml"
   curl -fsS --max-time 10 \
-    --resolve "${CDN_DOMAIN}:${CDN_PORT}:127.0.0.1" \
-    "https://${CDN_DOMAIN}:${CDN_PORT}${SUBSCRIPTION_PATH}" \
+    "https://${ARGO_DOMAIN}${SUBSCRIPTION_PATH}" \
     -o "${downloaded_profile}"
   cmp -s "${CLASH_PROFILE}" "${downloaded_profile}" \
     || die "HTTPS订阅内容与本地配置不一致。"
@@ -809,25 +750,23 @@ verify_runtime() {
   local warp_trace
   warp_trace="$(curl -fsS --max-time 12 --socks5-hostname "127.0.0.1:${WARP_PROXY_PORT}" https://www.cloudflare.com/cdn-cgi/trace)"
   grep -q '^warp=on$' <<<"${warp_trace}" || die "WARP出口没有返回warp=on。"
-  ok "Reality监听、HY2监听、CDN HTTP 101、Argo HTTP 101、订阅一致性和WARP出口均通过"
+  ok "Reality监听、HY2监听、Argo HTTP 101、订阅一致性和WARP出口均通过"
 }
 
 write_client_info() {
   say "保存客户端信息"
-  local encoded_cdn_path encoded_argo_path subscription_url
-  encoded_cdn_path="%2F${CDN_WS_PATH#/}"
+  local encoded_argo_path subscription_url
   encoded_argo_path="%2F${ARGO_WS_PATH#/}"
-  subscription_url="https://${CDN_DOMAIN}:${CDN_PORT}${SUBSCRIPTION_PATH}"
+  subscription_url="https://${ARGO_DOMAIN}${SUBSCRIPTION_PATH}"
 
-  local reality_link reality_warp_link hy2_link cdn_link argo_link
+  local reality_link reality_warp_link hy2_link argo_link
   reality_link="vless://${REALITY_DIRECT_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality"
   reality_warp_link="vless://${REALITY_WARP_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision#VPS-Reality-WARP"
   hy2_link="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}/?sni=${HY2_DOMAIN}&alpn=h3&insecure=0#VPS-HY2"
-  cdn_link="vless://${CDN_UUID}@${CDN_DOMAIN}:${CDN_PORT}?encryption=none&security=tls&sni=${CDN_DOMAIN}&type=ws&host=${CDN_DOMAIN}&path=${encoded_cdn_path}#VPS-CF-CDN"
   argo_link="vless://${ARGO_UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${encoded_argo_path}#VPS-Argo"
 
   cat >"${RESULT_FILE}" <<EOF
-Sing-box五合一客户端信息
+Sing-box四合一客户端信息
 生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
 【Reality直连】
@@ -839,17 +778,11 @@ ${reality_warp_link}
 【Hysteria 2】
 ${hy2_link}
 
-【Cloudflare CDN】
-${cdn_link}
-
 【Argo固定隧道】
 ${argo_link}
 
 【Clash Verge / Mihomo统一订阅】
 ${subscription_url}
-
-部署后的CDN优选：只把客户端或订阅中的CDN节点server改为本地测速所得优选IP/域名。
-servername和WebSocket Host必须继续使用${CDN_DOMAIN}。
 
 重要：本文件、节点链接、订阅地址和Argo Token均为秘密，不要公开。
 EOF
@@ -858,7 +791,7 @@ EOF
   printf '\n%s部署与服务端验证完成。%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
   printf '客户端信息：%s\n' "${RESULT_FILE}"
   printf 'Clash订阅：%s\n' "${subscription_url}"
-  printf '下一步：把%s切换为橙云并设置“完全（严格）”，然后从实际客户端逐个测试五个节点。\n' "${CDN_DOMAIN}"
+  printf '下一步：从实际客户端逐个测试四个节点。\n'
   printf 'HY2域名%s必须始终保持灰云。\n' "${HY2_DOMAIN}"
 }
 
@@ -873,6 +806,73 @@ finish_after_warp_install() {
   start_services
   verify_runtime
   write_client_info
+}
+
+migrate_current_to_four_in_one() {
+  require_root
+  require_debian
+  command -v jq >/dev/null 2>&1 && command -v caddy >/dev/null 2>&1 \
+    || die "迁移需要现有jq和Caddy。"
+  [[ -f "${SING_BOX_CONFIG}" && -f "${CLASH_PROFILE}" && -f "${CADDY_CONFIG}" ]] \
+    || die "没有找到完整的五合一配置，拒绝迁移。"
+  jq -e '.inbounds[] | select(.tag == "cdn-ws")' "${SING_BOX_CONFIG}" >/dev/null \
+    || die "没有找到旧CDN入站，当前配置不属于可迁移的五合一版本。"
+  jq -e '.inbounds[] | select(.tag == "argo-ws")' "${SING_BOX_CONFIG}" >/dev/null \
+    || die "没有找到Argo入站，拒绝迁移。"
+
+  HY2_DOMAIN="$(jq -r '.inbounds[] | select(.tag == "hy2-in").tls.server_name' "${SING_BOX_CONFIG}")"
+  ARGO_DOMAIN="$(awk '/name: VPS-Argo/{found=1} found && /server:/{print $2; exit}' "${CLASH_PROFILE}")"
+  ARGO_WS_PATH="$(jq -r '.inbounds[] | select(.tag == "argo-ws").transport.path' "${SING_BOX_CONFIG}")"
+  SUBSCRIPTION_PATH="$(awk '/@subscription path /{print $3; exit}' "${CADDY_CONFIG}")"
+  valid_domain "${HY2_DOMAIN}" && valid_domain "${ARGO_DOMAIN}" \
+    || die "无法从旧配置解析HY2或Argo域名。"
+  [[ "${ARGO_WS_PATH}" == /* && "${SUBSCRIPTION_PATH}" == /* ]] \
+    || die "无法从旧配置解析Argo或订阅路径。"
+  HY2_CERT_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.crt"
+  HY2_KEY_PATH="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HY2_DOMAIN}/${HY2_DOMAIN}.key"
+  [[ -s "${HY2_CERT_PATH}" && -s "${HY2_KEY_PATH}" ]] \
+    || die "现有HY2证书文件不存在，拒绝迁移。"
+
+  local stamp tmp_config tmp_profile
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  TEMP_DIR="$(mktemp -d)"
+  tmp_config="${TEMP_DIR}/config.json"
+  tmp_profile="${TEMP_DIR}/clash-verge.yaml"
+  cp -p "${SING_BOX_CONFIG}" "${SING_BOX_CONFIG}.before-four-in-one-${stamp}"
+  cp -p "${CLASH_PROFILE}" "${CLASH_PROFILE}.before-four-in-one-${stamp}"
+  cp -p "${CADDY_CONFIG}" "${CADDY_CONFIG}.before-four-in-one-${stamp}"
+
+  jq '.inbounds |= map(select(.tag != "cdn-ws"))' "${SING_BOX_CONFIG}" >"${tmp_config}"
+  awk '
+    /^  - name: VPS-CF-CDN$/ {skip=1; next}
+    skip && /^  - name:/ {skip=0}
+    skip {next}
+    $0 == "      - VPS-CF-CDN" {next}
+    {print}
+  ' "${CLASH_PROFILE}" >"${tmp_profile}"
+  sing-box check -c "${tmp_config}" || die "迁移后的Sing-box配置检查失败。"
+  grep -q 'VPS-CF-CDN' "${tmp_profile}" && die "迁移后的订阅仍包含CDN节点。"
+
+  install -m 600 "${tmp_config}" "${SING_BOX_CONFIG}"
+  install -m 600 "${tmp_profile}" "${CLASH_PROFILE}"
+  write_caddy_config
+  systemctl reload caddy
+  systemctl restart sing-box
+  systemctl is-active --quiet caddy && systemctl is-active --quiet sing-box \
+    || die "迁移后Caddy或Sing-box未正常运行。"
+
+  local local_ws_code
+  local_ws_code="$(verify_websocket \
+    "http://127.0.0.1:${ARGO_CADDY_LOCAL_PORT}${ARGO_WS_PATH}" "${ARGO_DOMAIN}")"
+  [[ "${local_ws_code}" == "101" ]] || die "本机Argo分流未返回HTTP 101。"
+  curl -fsS --max-time 5 \
+    -H "Host: ${ARGO_DOMAIN}" \
+    "http://127.0.0.1:${ARGO_CADDY_LOCAL_PORT}${SUBSCRIPTION_PATH}" \
+    -o "${TEMP_DIR}/profile.yaml"
+  cmp -s "${CLASH_PROFILE}" "${TEMP_DIR}/profile.yaml" \
+    || die "本机Argo订阅内容不一致。"
+  ok "当前VPS已迁移为四合一，本机Argo分流和订阅均通过"
+  printf '现在把Cloudflare Tunnel服务地址改为 http://localhost:%s，再验证公网Argo和订阅。\n' "${ARGO_CADDY_LOCAL_PORT}"
 }
 
 resume_after_warp_failure() {
@@ -894,6 +894,10 @@ resume_after_warp_failure() {
 }
 
 main() {
+  if [[ "${1:-}" == "--migrate-current-to-four-in-one" ]]; then
+    migrate_current_to_four_in_one
+    return
+  fi
   if [[ "${1:-}" == "--resume-after-warp" ]]; then
     resume_after_warp_failure
     return

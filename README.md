@@ -1,24 +1,22 @@
 # VPS Recovery Scripts
 
-## Sing-box五合一（待真实VPS实测）
+## Sing-box四合一（服务端已实测）
 
-唯一代理内核为Sing-box，一次部署五个客户端节点：
+唯一代理内核为Sing-box，一次部署四个客户端节点：
 
 - VLESS + Reality，VPS原生出口
 - VLESS + Reality，Cloudflare WARP出口
 - Hysteria 2
-- VLESS + WebSocket + Cloudflare CDN
 - VLESS + WebSocket + Cloudflare Tunnel（Argo）
 
 辅助组件为Caddy、cloudflared和Cloudflare官方WARP客户端。
 
 ### 前置准备
 
-在Cloudflare准备三个不同的子域名：
+在Cloudflare准备两个不同的子域名：
 
-- `cdn.example.com`：运行脚本时保持灰云，成功后切换橙云
 - `hy2.example.com`：始终保持灰云
-- `argo.example.com`：绑定固定Cloudflare Tunnel，服务地址设置为 `http://localhost:10001`
+- `argo.example.com`：绑定固定Cloudflare Tunnel，服务地址设置为 `http://localhost:10002`
 
 准备该固定Tunnel的Token。Token输入时不会显示，也不会写入订阅或终端总结。
 
@@ -28,13 +26,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh)
 ```
 
-> 当前五合一脚本已通过Bash语法、静态安全契约和Sing-box 1.13.14配置解析；尚未在全新VPS完成五条真实链路验收。正式恢复前继续保留下面的三合一方案。
-
-如果旧版脚本在WARP软件源处报 `NO_PUBKEY 6E2DD2174FA1C3BA` 并中止，使用专用安全续跑入口：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh) --resume-after-warp
-```
+> 2026-07-06已在1核低内存Debian VPS完成Reality、Reality-WARP、HY2、Argo、WARP出口和Argo订阅的服务端链路验证；客户端仍需逐节点实测。
 
 ## 已实测三合一
 
