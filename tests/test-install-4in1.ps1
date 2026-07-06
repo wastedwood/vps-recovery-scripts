@@ -29,6 +29,9 @@ Assert-Contains '"disable_tls_alpn_challenge"\s*:\s*true' 'HTTP-only ACME challe
 Assert-Contains 'ExecStart=.*--url http://127\.0\.0\.1:(?<!\\)\$\{ARGO_WS_LOCAL_PORT\}' 'cloudflared direct Argo target expanded while writing service'
 Assert-Contains 'warp=on' 'WARP runtime verification'
 Assert-Contains 'wait_for_routes\(\)' 'route readiness retry function'
+Assert-Contains "sed -n 's/\^PrivateKey\[\[:space:\]\]\*=\[\[:space:\]\]\*//p'" 'private key parser preserves Base64 padding'
+Assert-Contains "sed -n 's/\^PublicKey\[\[:space:\]\]\*=\[\[:space:\]\]\*//p'" 'public key parser preserves Base64 padding'
+Assert-Contains '--resume-after-config-failure' 'safe resume mode for step 9 failure'
 
 Assert-NotContains 'install_caddy' 'Caddy installer'
 Assert-NotContains '/etc/caddy' 'Caddy configuration path'

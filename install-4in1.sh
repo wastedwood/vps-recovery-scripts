@@ -234,12 +234,12 @@ generate_warp_profile() {
     "${wgcf}" generate >/dev/null
   )
 
-  WARP_PRIVATE_KEY="$(awk -F' *= *' '/^PrivateKey/ {print $2; exit}' "${profile}")"
+  WARP_PRIVATE_KEY="$(sed -n 's/^PrivateKey[[:space:]]*=[[:space:]]*//p' "${profile}" | head -n1)"
   local addresses endpoint
   addresses="$(awk -F' *= *' '/^Address/ {print $2; exit}' "${profile}")"
   WARP_IPV4="$(tr ',' '\n' <<<"${addresses}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -m1 '\.')"
   WARP_IPV6="$(tr ',' '\n' <<<"${addresses}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -m1 ':')"
-  WARP_PEER_PUBLIC_KEY="$(awk -F' *= *' '/^PublicKey/ {print $2; exit}' "${profile}")"
+  WARP_PEER_PUBLIC_KEY="$(sed -n 's/^PublicKey[[:space:]]*=[[:space:]]*//p' "${profile}" | head -n1)"
   endpoint="$(awk -F' *= *' '/^Endpoint/ {print $2; exit}' "${profile}")"
   WARP_ENDPOINT_HOST="${endpoint%:*}"
   WARP_ENDPOINT_PORT="${endpoint##*:}"
@@ -525,7 +525,39 @@ start_and_verify() {
   ok "Reality、HY2、Argo和Sing-box内置WARP均通过验证"
 }
 
+finish_deployment() {
+  write_sing_box_config
+  write_services
+  write_client_files
+  configure_firewall
+  start_and_verify
+  printf '\n%s部署完成。%s\n客户端信息：%s\nClash配置：%s\n' \
+    "${GREEN}" "${RESET}" "${RESULT_FILE}" "${CLASH_PROFILE}"
+}
+
+resume_after_config_failure() {
+  require_root
+  require_debian
+  command -v sing-box >/dev/null 2>&1 && command -v cloudflared >/dev/null 2>&1 \
+    || die "续跑条件不满足：Sing-box或cloudflared尚未完整安装。"
+  [[ -f "${SING_BOX_CONFIG}" && ! -f "${SING_BOX_SERVICE}" \
+    && ! -f "${CLOUDFLARED_SERVICE}" ]] \
+    || die "当前状态不属于第9步配置检查失败，拒绝续跑。"
+
+  read_inputs
+  TEMP_DIR="$(mktemp -d)"
+  architecture_values
+  detect_public_ip_and_dns
+  generate_warp_profile
+  generate_credentials
+  finish_deployment
+}
+
 main() {
+  if [[ "${1:-}" == "--resume-after-config-failure" ]]; then
+    resume_after_config_failure
+    return
+  fi
   [[ $# -eq 0 ]] || die "不支持参数：${1}"
   require_root
   require_debian
@@ -539,12 +571,7 @@ main() {
   install_cloudflared
   generate_warp_profile
   generate_credentials
-  write_sing_box_config
-  write_services
-  write_client_files
-  configure_firewall
-  start_and_verify
-  printf '\n%s部署完成。%s\n客户端信息：%s\nClash配置：%s\n' "${GREEN}" "${RESET}" "${RESULT_FILE}" "${CLASH_PROFILE}"
+  finish_deployment
 }
 
 main "$@"
