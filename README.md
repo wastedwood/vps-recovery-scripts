@@ -23,7 +23,7 @@
 ### 一行安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-4in1.sh)
 ```
 
 > 2026-07-06已在1核低内存Debian VPS完成Reality、Reality-WARP、HY2、Argo、WARP出口和Argo订阅的服务端链路验证；客户端仍需逐节点实测。

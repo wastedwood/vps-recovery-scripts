@@ -2,7 +2,7 @@
 #
 # 在全新 Debian 12/13 VPS 上运行：
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-4in1.sh)
 #
 # 四个客户端节点：
 #   1. VLESS + Reality，VPS原生出口
