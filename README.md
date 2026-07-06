@@ -17,6 +17,10 @@ Sing-box同时负责HY2自动证书和WARP WireGuard出口。辅助组件只有
 
 ### 前置准备
 
+> **重要：**新版不再使用Caddy，Argo Tunnel的服务地址必须是
+> `http://localhost:10001`。如果以前填写的是`http://localhost:10002`，必须先修改，
+> 否则安装最后会出现HTTP 502。
+
 在Cloudflare准备两个不同的子域名：
 
 - `hy2.example.com`：始终保持灰云
