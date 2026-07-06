@@ -30,6 +30,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scri
 
 > 当前五合一脚本已通过Bash语法、静态安全契约和Sing-box 1.13.14配置解析；尚未在全新VPS完成五条真实链路验收。正式恢复前继续保留下面的三合一方案。
 
+如果旧版脚本在WARP软件源处报 `NO_PUBKEY 6E2DD2174FA1C3BA` 并中止，使用专用安全续跑入口：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-5in1.sh) --resume-after-warp
+```
+
 ## 已实测三合一
 
 一次部署三条独立代理通道：

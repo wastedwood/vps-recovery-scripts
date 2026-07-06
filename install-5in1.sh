@@ -307,6 +307,7 @@ install_warp() {
   say "安装Cloudflare官方WARP客户端"
   curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg |
     gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+  chmod 644 /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
   local codename
   codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")"
   printf 'deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ %s main\n' "${codename}" \
@@ -861,7 +862,44 @@ EOF
   printf 'HY2域名%s必须始终保持灰云。\n' "${HY2_DOMAIN}"
 }
 
+finish_after_warp_install() {
+  generate_credentials
+  write_sing_box_config
+  write_sing_box_service
+  write_clash_profile
+  write_caddy_config
+  write_cloudflared_service
+  configure_firewall
+  start_services
+  verify_runtime
+  write_client_info
+}
+
+resume_after_warp_failure() {
+  require_root
+  require_debian
+
+  command -v sing-box >/dev/null 2>&1 \
+    && command -v caddy >/dev/null 2>&1 \
+    && command -v cloudflared >/dev/null 2>&1 \
+    || die "续跑条件不满足：前七步并未完整安装。"
+  [[ ! -f "${SING_BOX_CONFIG}" && ! -f "${CLOUDFLARED_SERVICE}" ]] \
+    || die "检测到五合一配置或服务已经生成，不能使用第8步专用续跑模式。"
+
+  read_inputs
+  TEMP_DIR="$(mktemp -d)"
+  detect_public_ip_and_dns
+  install_warp
+  finish_after_warp_install
+}
+
 main() {
+  if [[ "${1:-}" == "--resume-after-warp" ]]; then
+    resume_after_warp_failure
+    return
+  fi
+  [[ $# -eq 0 ]] || die "未知参数：${1}"
+
   require_root
   require_debian
   refuse_existing_installation
@@ -875,16 +913,7 @@ main() {
   install_caddy
   install_cloudflared
   install_warp
-  generate_credentials
-  write_sing_box_config
-  write_sing_box_service
-  write_clash_profile
-  write_caddy_config
-  write_cloudflared_service
-  configure_firewall
-  start_services
-  verify_runtime
-  write_client_info
+  finish_after_warp_install
 }
 
 main "$@"
