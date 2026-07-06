@@ -470,8 +470,7 @@ write_sing_box_config() {
 }
 EOF
   chmod 600 "${SING_BOX_CONFIG}"
-  sing-box check -c "${SING_BOX_CONFIG}" || die "Sing-box配置检查失败。"
-  ok "Sing-box配置检查通过"
+  ok "Sing-box配置已写入，等待Caddy签发HY2证书后检查"
 }
 
 write_sing_box_service() {
@@ -588,9 +587,11 @@ write_caddy_config() {
     "${CLASH_PROFILE}" "${SUBSCRIPTION_DIR}${SUBSCRIPTION_PATH}"
 
   {
+    printf '{\n'
     if [[ -n "${ACME_EMAIL}" ]]; then
-      printf '{\n\temail %s\n}\n\n' "${ACME_EMAIL}"
+      printf '\temail %s\n' "${ACME_EMAIL}"
     fi
+    printf '\thttps_port %s\n}\n\n' "${HY2_CERT_LOCAL_PORT}"
     cat <<EOF
 http://:${ARGO_CADDY_LOCAL_PORT} {
 	bind 127.0.0.1
@@ -612,7 +613,7 @@ http://:${ARGO_CADDY_LOCAL_PORT} {
 	}
 }
 
-https://${HY2_DOMAIN}:${HY2_CERT_LOCAL_PORT} {
+${HY2_DOMAIN} {
 	bind 127.0.0.1
 	tls {
 		issuer acme {
@@ -693,6 +694,7 @@ start_services() {
   systemctl daemon-reload
   systemctl enable --now caddy >/dev/null
   wait_for_hy2_certificate
+  sing-box check -c "${SING_BOX_CONFIG}" || die "Sing-box配置检查失败。"
   systemctl enable --now sing-box >/dev/null
   systemctl enable --now cloudflared-argo >/dev/null
 
@@ -893,7 +895,29 @@ resume_after_warp_failure() {
   finish_after_warp_install
 }
 
+resume_after_sing_box_config_failure() {
+  require_root
+  require_debian
+  command -v sing-box >/dev/null 2>&1 \
+    && command -v caddy >/dev/null 2>&1 \
+    && command -v cloudflared >/dev/null 2>&1 \
+    && command -v warp-cli >/dev/null 2>&1 \
+    || die "续跑条件不满足：前置组件并未完整安装。"
+  [[ -f "${SING_BOX_CONFIG}" && ! -f "${SING_BOX_SERVICE}" ]] \
+    || die "当前状态不属于第10步证书检查失败，拒绝专用续跑。"
+
+  read_inputs
+  TEMP_DIR="$(mktemp -d)"
+  detect_public_ip_and_dns
+  generate_credentials
+  finish_after_warp_install
+}
+
 main() {
+  if [[ "${1:-}" == "--resume-after-sing-box-config" ]]; then
+    resume_after_sing_box_config_failure
+    return
+  fi
   if [[ "${1:-}" == "--migrate-current-to-four-in-one" ]]; then
     migrate_current_to_four_in_one
     return
