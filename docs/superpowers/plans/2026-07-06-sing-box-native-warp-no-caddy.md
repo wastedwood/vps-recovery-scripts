@@ -51,4 +51,4 @@
 - [x] Run `bash -n install-4in1.sh` in a Bash environment.
 - [x] Run the regression test; ShellCheck is not installed in this workspace.
 - [x] Review `git diff` and ensure unrelated untracked directories are not staged.
-- [ ] Commit the implementation, push `main` to `origin`, and report the raw GitHub Bash command.
+- [x] Commit the implementation, push `main` to `origin`, and report the raw GitHub Bash command.
