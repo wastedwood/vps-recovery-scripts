@@ -1,0 +1,4 @@
+.playwright-mcp/
+archives/
+node_modules/
+tests/
