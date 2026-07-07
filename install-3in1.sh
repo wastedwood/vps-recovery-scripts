@@ -109,7 +109,7 @@ say() {
 }
 
 input_title() {
-  printf '\n%s── [输入 %s/4] %s%s\n' \
+  printf '\n%s── [输入 %s/5] %s%s\n' \
     "${COLOR_CYAN}" "$1" "$2" "${COLOR_RESET}"
 }
 
@@ -206,36 +206,51 @@ read_inputs() {
   printf '%sCloudflare DNS必须提前创建两条A记录：%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
   printf '\n【CDN子域名】\n'
   printf '  记录类型：A\n'
-  printf '  名称：例如 cdn.example.com\n'
+  printf '  名称：例如 cdn.example.com（前缀 cdn + 根域名 example.com）\n'
   printf '  IPv4 地址：填写这台新 VPS 的公网 IPv4\n'
   printf '  代理状态：关闭代理，保持灰云（仅 DNS）\n'
   printf '  TTL：自动\n'
   printf '  部署完成后再切换橙云\n\n'
   printf '【HY2子域名】\n'
   printf '  记录类型：A\n'
-  printf '  名称：例如 hy2.example.com\n'
+  printf '  名称：例如 hy2.example.com（前缀 hy2 + 根域名 example.com）\n'
   printf '  IPv4 地址：填写同一台VPS的公网IPv4\n'
   printf '  代理状态：始终保持灰云（仅DNS），不能开启橙云\n'
   printf '  TTL：自动\n\n'
   printf '脚本会核对两个域名；不符合条件时会停止。\n\n'
 
-  input_title 1 "CDN 子域名"
-  printf '填写刚才在 Cloudflare 创建的完整域名，例如 cdn.example.com。\n'
-  read -r -p "请输入: " CDN_DOMAIN
-  CDN_DOMAIN="${CDN_DOMAIN,,}"
-  [[ "${CDN_DOMAIN}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
-    || die "CDN 域名格式不正确。"
+  input_title 1 "根域名"
+  printf '只填写共同的根域名，例如 example.com。不要填写 cdn 或 hy2 前缀。\n'
+  read -r -p "请输入: " ROOT_DOMAIN
+  ROOT_DOMAIN="${ROOT_DOMAIN,,}"
+  [[ "${ROOT_DOMAIN}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+    || die "根域名格式不正确。请填写类似 example.com 的域名。"
 
-  input_title 2 "HY2 子域名"
-  printf '该域名必须始终保持灰云，例如 hy2.example.com。\n'
-  read -r -p "请输入: " HY2_DOMAIN
-  HY2_DOMAIN="${HY2_DOMAIN,,}"
-  [[ "${HY2_DOMAIN}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
-    || die "HY2 域名格式不正确。"
-  [[ "${HY2_DOMAIN}" != "${CDN_DOMAIN}" ]] \
-    || die "CDN 与 HY2 必须使用两个不同的子域名。"
+  input_title 2 "CDN 前缀"
+  printf '直接按回车使用默认前缀 cdn。\n'
+  read -r -p "请输入（可直接回车）: " CDN_PREFIX
+  CDN_PREFIX="${CDN_PREFIX,,}"
+  CDN_PREFIX="${CDN_PREFIX:-cdn}"
+  [[ "${CDN_PREFIX}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "CDN 前缀格式不正确，只能使用字母、数字和中划线。"
+  CDN_DOMAIN="${CDN_PREFIX}.${ROOT_DOMAIN}"
+  (( ${#CDN_DOMAIN} <= 253 )) || die "CDN 完整域名超过 253 个字符。"
+  ok "CDN 完整域名：${CDN_DOMAIN}"
 
-  input_title 3 "Reality 目标"
+  input_title 3 "HY2 前缀"
+  printf '直接按回车使用默认前缀 hy2；该域名必须始终保持灰云。\n'
+  read -r -p "请输入（可直接回车）: " HY2_PREFIX
+  HY2_PREFIX="${HY2_PREFIX,,}"
+  HY2_PREFIX="${HY2_PREFIX:-hy2}"
+  [[ "${HY2_PREFIX}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "HY2 前缀格式不正确，只能使用字母、数字和中划线。"
+  [[ "${HY2_PREFIX}" != "${CDN_PREFIX}" ]] \
+    || die "CDN 与 HY2 必须使用两个不同的前缀。"
+  HY2_DOMAIN="${HY2_PREFIX}.${ROOT_DOMAIN}"
+  (( ${#HY2_DOMAIN} <= 253 )) || die "HY2 完整域名超过 253 个字符。"
+  ok "HY2 完整域名：${HY2_DOMAIN}"
+
+  input_title 4 "Reality 目标"
   printf '不了解这项就直接按回车，使用默认值 www.debian.org:443。\n'
   read -r -p "请输入（可直接回车）: " REALITY_TARGET
   REALITY_TARGET="${REALITY_TARGET:-www.debian.org:443}"
@@ -247,7 +262,7 @@ read_inputs() {
   (( REALITY_TARGET_PORT >= 1 && REALITY_TARGET_PORT <= 65535 )) \
     || die "REALITY 目标端口超出范围。"
 
-  input_title 4 "证书联系邮箱"
+  input_title 5 "证书联系邮箱"
   printf '这项可留空，直接按回车即可。\n'
   read -r -p "请输入（可直接回车）: " ACME_EMAIL
   if [[ -n "${ACME_EMAIL}" && ! "${ACME_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
