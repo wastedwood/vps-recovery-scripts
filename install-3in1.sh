@@ -61,26 +61,34 @@ readonly REALITY_PORT="443"
 readonly HY2_PORT="443"
 readonly CDN_PORT="8443"
 readonly CERT_WAIT_SECONDS="120"
+readonly TOTAL_STEPS="17"
 
 TEMP_DIR=""
 STEP_NO=0
 CDN_TLS_READY=false
 ARCH=""
 SING_BOX_SHA256=""
+TTY_MODE=false
+WAIT_LABEL=""
 
 if [[ -t 1 ]]; then
+  TTY_MODE=true
   readonly COLOR_GREEN=$'\033[1;32m'
   readonly COLOR_YELLOW=$'\033[1;33m'
   readonly COLOR_RED=$'\033[1;31m'
   readonly COLOR_CYAN=$'\033[1;36m'
-  readonly COLOR_BOLD=$'\033[1m'
+  readonly COLOR_MAGENTA=$'\033[1;35m'
+  readonly COLOR_DIM=$'\033[2m'
+  readonly COLOR_WHITE=$'\033[1;37m'
   readonly COLOR_RESET=$'\033[0m'
 else
   readonly COLOR_GREEN=""
   readonly COLOR_YELLOW=""
   readonly COLOR_RED=""
   readonly COLOR_CYAN=""
-  readonly COLOR_BOLD=""
+  readonly COLOR_MAGENTA=""
+  readonly COLOR_DIM=""
+  readonly COLOR_WHITE=""
   readonly COLOR_RESET=""
 fi
 
@@ -93,9 +101,12 @@ cleanup() {
 on_error() {
   local exit_code=$?
   local line_no=${1:-unknown}
-  printf '\n%s  ✗ 脚本异常中止%s\n' "${COLOR_RED}" "${COLOR_RESET}" >&2
-  printf '    位置：第 %s 行；退出码：%s\n' "${line_no}" "${exit_code}" >&2
-  printf '    请先查看上方第一条错误信息，不要反复执行脚本。\n' >&2
+  wait_finish
+  printf '\n%s>>> SYSTEM ABORTED%s\n' "${COLOR_RED}" "${COLOR_RESET}" >&2
+  printf '%s   ✗ [FAIL]%s 脚本在第 %s 行异常中止，退出码 %s。\n' \
+    "${COLOR_RED}" "${COLOR_RESET}" "${line_no}" "${exit_code}" >&2
+  printf '%s   请先检查上方第一条错误，不要反复执行脚本。%s\n' \
+    "${COLOR_DIM}" "${COLOR_RESET}" >&2
   exit "${exit_code}"
 }
 
@@ -104,30 +115,79 @@ trap 'on_error "$LINENO"' ERR
 
 say() {
   STEP_NO=$((STEP_NO + 1))
-  printf '\n%s━━ [步骤 %02d] %s ━━%s\n' \
-    "${COLOR_CYAN}" "${STEP_NO}" "$1" "${COLOR_RESET}"
+  printf '\n%s»» EXECUTION SEQUENCE %02d/%02d%s\n' \
+    "${COLOR_MAGENTA}" "${STEP_NO}" "${TOTAL_STEPS}" "${COLOR_RESET}"
+  printf '   %s%s%s\n' "${COLOR_WHITE}" "$1" "${COLOR_RESET}"
 }
 
 input_title() {
-  printf '\n%s── [输入 %s/5] %s%s\n' \
+  printf '\n%s┌─[ INPUT %s/5 · %s ]%s\n' \
     "${COLOR_CYAN}" "$1" "$2" "${COLOR_RESET}"
 }
 
 ok() {
-  printf '%s  ✓ %s%s\n' "${COLOR_GREEN}" "$1" "${COLOR_RESET}"
+  printf '%s   ✓ [PASS]%s %s\n' "${COLOR_GREEN}" "${COLOR_RESET}" "$1"
 }
 
 warn() {
-  printf '%s  ! %s%s\n' "${COLOR_YELLOW}" "$1" "${COLOR_RESET}" >&2
+  printf '%s   ! [WARN]%s %s\n' "${COLOR_YELLOW}" "${COLOR_RESET}" "$1" >&2
 }
 
 die() {
-  printf '\n%s  ✗ 错误：%s%s\n' "${COLOR_RED}" "$1" "${COLOR_RESET}" >&2
+  wait_finish
+  printf '\n%s   ✗ [FAIL]%s %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2
   exit 1
 }
 
 wait_status() {
-  printf '  %s…%s 正在等待 %s' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"
+  WAIT_LABEL="$1"
+  if [[ "${TTY_MODE}" == true ]]; then
+    wait_tick 0
+  else
+    printf '   … [WAIT] %s\n' "${WAIT_LABEL}"
+  fi
+}
+
+wait_tick() {
+  local elapsed=$1
+  [[ "${TTY_MODE}" == true ]] || return 0
+  local -a frames=("◢" "◣" "◤" "◥")
+  local frame_index=$((elapsed / 5 % 4))
+  printf '\r\033[2K%s   %s [WAIT]%s %s · %ss' \
+    "${COLOR_CYAN}" "${frames[frame_index]}" "${COLOR_RESET}" \
+    "${WAIT_LABEL}" "${elapsed}"
+}
+
+wait_finish() {
+  if [[ "${TTY_MODE}" == true ]]; then
+    printf '\r\033[2K'
+  fi
+  WAIT_LABEL=""
+}
+
+print_header() {
+  printf '\n%s╦ ╦ ╔═╗ ╦   ╦   ╔═╗     ╦ ╦ ╔═╗ ╦═╗ ╦   ╔╦╗%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '%s╠═╣ ║╣  ║   ║   ║ ║     ║║║ ║ ║ ╠╦╝ ║    ║║%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '%s╩ ╩ ╚═╝ ╩═╝ ╩═╝ ╚═╝     ╚╩╝ ╚═╝ ╩╚═ ╩═╝ ═╩╝%s\n\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+}
+
+print_target_matrix() {
+  printf '\n%s┌─[ TARGET MATRIX ]────────────────────────────────────────%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '%s│%s REALITY   %sPRIMARY%s  VPS_IP:%s  SNI=%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}" \
+    "${REALITY_PORT}" "${REALITY_TARGET}"
+  printf '%s│%s HYSTERIA  %sUDP%s      %s:%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}" \
+    "${HY2_DOMAIN}" "${HY2_PORT}"
+  printf '%s│%s CF_EDGE   %sSTANDBY%s  https://%s:%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_YELLOW}" "${COLOR_RESET}" \
+    "${CDN_DOMAIN}" "${CDN_PORT}"
+  printf '%s└───────────────────────────────────────────────────────────%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}"
 }
 
 require_root() {
@@ -192,18 +252,20 @@ refuse_existing_installation() {
 }
 
 read_inputs() {
-  printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' \
+  print_header
+  printf '%s┌─[ DEPLOYMENT PROFILE ]────────────────────────────────────%s\n' \
     "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '%s              VPS 三节点部署向导%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' \
+  printf '%s│%s REALITY      TCP 443     %sPRIMARY%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '%s│%s HYSTERIA 2   UDP 443     %sHIGH SPEED%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '%s│%s CF CDN       TCP 8443    %sFALLBACK%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${COLOR_YELLOW}" "${COLOR_RESET}"
+  printf '%s└───────────────────────────────────────────────────────────%s\n' \
     "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '完成后将得到三个独立节点和一条 Clash Verge 订阅：\n'
-  printf '  1. Reality：主节点，部署后立即测试\n'
-  printf '  2. Hysteria 2：UDP弱网备用节点\n'
-  printf '  3. Cloudflare CDN：切换橙云后使用的备用节点\n\n'
-  printf '%s运行要求：%s全新的 Debian 12/13 VPS；开放 TCP 22、80、443、8443 和 UDP 443。\n\n' \
-    "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '%sCloudflare DNS必须提前创建两条A记录：%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+  printf '\n%sSYSTEM REQUIREMENTS%s\n' "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '   Debian 12/13 · TCP 22/80/443/8443 · UDP 443\n'
+  printf '   Cloudflare DNS 必须提前创建两条 A 记录。\n'
   printf '\n【CDN子域名】\n'
   printf '  记录类型：A\n'
   printf '  名称：例如 cdn.example.com（前缀 cdn + 根域名 example.com）\n'
@@ -269,12 +331,9 @@ read_inputs() {
     die "邮箱格式不正确。"
   fi
 
-  printf '\n%s── 部署确认 ──%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '  Reality  VPS_IP:%s；伪装目标 %s\n' "${REALITY_PORT}" "${REALITY_TARGET}"
-  printf '  HY2      %s:%s/UDP；始终灰云\n' "${HY2_DOMAIN}" "${HY2_PORT}"
-  printf '  CDN      %s:%s；转发到 127.0.0.1:%s\n' \
-    "${CDN_DOMAIN}" "${CDN_PORT}" "${WS_LOCAL_PORT}"
-  printf '\n继续前请再次确认：两个A记录均为灰云，并已指向这台VPS。\n'
+  print_target_matrix
+  printf '\n%s»» DEPLOYMENT AUTHORIZATION%s\n' "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '   请确认两个 A 记录均为灰云，并已指向这台 VPS。\n'
   read -r -p "确认无误后输入 DEPLOY 并回车: " CONFIRM
   [[ "${CONFIRM}" == "DEPLOY" ]] || die "用户取消。"
 }
@@ -377,7 +436,7 @@ install_sing_box() {
   local archive="sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz"
   local download_url="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
 
-  curl -fL --retry 2 --retry-delay 2 "${download_url}" -o "${TEMP_DIR}/${archive}"
+  curl -fsSL --retry 2 --retry-delay 2 "${download_url}" -o "${TEMP_DIR}/${archive}"
   printf '%s  %s\n' "${SING_BOX_SHA256}" "${TEMP_DIR}/${archive}" |
     sha256sum -c - >/dev/null || die "sing-box 安装包校验失败。"
   tar -xzf "${TEMP_DIR}/${archive}" -C "${TEMP_DIR}"
@@ -742,12 +801,14 @@ EOF
 }
 
 configure_firewall() {
+  say "配置防火墙"
+
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-    say "放行 UFW 端口"
     ufw allow 80/tcp
     ufw allow "${REALITY_PORT}/tcp"
     ufw allow "${CDN_PORT}/tcp"
     ufw allow "${HY2_PORT}/udp"
+    ok "UFW 已放行部署所需端口"
     return
   fi
 
@@ -760,7 +821,11 @@ configure_firewall() {
       warn "检测到 nftables 规则，但未自动放行端口。"
       printf '    请手动放行 TCP 80、%s、%s 和 UDP %s。\n' \
         "${REALITY_PORT}" "${CDN_PORT}" "${HY2_PORT}" >&2
+    else
+      ok "nftables 未发现阻止部署的活动规则"
     fi
+  else
+    warn "未检测到 UFW 或 nftables；请确认 VPS 控制台防火墙已放行端口。"
   fi
 }
 
@@ -776,11 +841,13 @@ start_services() {
     journalctl -u sing-box -n 50 --no-pager >&2
     die "sing-box 启动失败。"
   }
+  ok "sing-box 服务 RUNNING"
 
   systemctl is-active --quiet caddy || {
     journalctl -u caddy -n 80 --no-pager >&2
     die "Caddy 启动失败，常见原因是 DNS 未生效或 80/8443 端口未放行。"
   }
+  ok "Caddy 服务 RUNNING"
 
   systemctl enable "${HYSTERIA_SERVICE}" >/dev/null
   systemctl restart "${HYSTERIA_SERVICE}"
@@ -790,17 +857,17 @@ start_services() {
   while (( elapsed < 120 )); do
     if systemctl is-active --quiet "${HYSTERIA_SERVICE}" &&
       udp_port_is_listening "${HY2_PORT}"; then
-      printf '\n'
+      wait_finish
       ok "Hysteria证书已申请成功，并监听UDP ${HY2_PORT}"
       ok "sing-box、Caddy和Hysteria均已设置为开机自动运行"
       return
     fi
-    printf '.'
     sleep 5
     elapsed=$((elapsed + 5))
+    wait_tick "${elapsed}"
   done
 
-  printf '\n'
+  wait_finish
   journalctl -u "${HYSTERIA_SERVICE}" -n 100 --no-pager >&2
   die "Hysteria在120秒内未能启动。请检查HY2灰云DNS、TCP 80和UDP 443。"
 }
@@ -825,17 +892,17 @@ verify_listeners() {
       "https://${CDN_DOMAIN}:${CDN_PORT}/" \
       -o /dev/null 2>/dev/null; then
       CDN_TLS_READY=true
-      printf '\n'
+      wait_finish
       ok "TLS 证书已申请成功，域名验证通过"
       break
     fi
-    printf '.'
     sleep 5
     elapsed=$((elapsed + 5))
+    wait_tick "${elapsed}"
   done
 
   if [[ "${CDN_TLS_READY}" != true ]]; then
-    printf '\n'
+    wait_finish
     warn "证书在 ${CERT_WAIT_SECONDS} 秒内仍未就绪，CDN 节点暂时不能使用。"
     warn "Reality 节点不受影响，可以立即导入测试。"
     warn "检查命令：journalctl -u caddy -n 100 --no-pager"
@@ -947,43 +1014,55 @@ EOF
 
   chmod 600 "${RESULT_FILE}"
 
-  printf '\n%s━━━━━━━━━━━━ ━━ 部署完成 ━━ ━━━━━━━━━━━━%s\n' \
-    "${COLOR_GREEN}" "${COLOR_RESET}"
-  printf '%s  三个节点和 Clash Verge 订阅均已生成%s\n\n' \
-    "${COLOR_BOLD}" "${COLOR_RESET}"
-
-  printf '%s[1] Reality 主节点｜现在直接导入测试%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
-  printf '%s\n\n' "${REALITY_LINK}"
-  printf '%s[2] HY2 备用节点｜现在直接导入测试%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
-  printf '%s\n\n' "${HY2_LINK}"
-  printf '%s  ! 注意：%s 必须始终保持灰云。%s\n\n' \
-    "${COLOR_YELLOW}" "${HY2_DOMAIN}" "${COLOR_RESET}"
-
+  printf '\n%s╔═[ MISSION ACCOMPLISHED ]══════════════════════════════════════╗%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '%s║%s  %s✓%s 03 NETWORK PATHS DEPLOYED                                  %s║%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}" \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '%s║%s  %s✓%s 03 SERVICES AUTOSTART ENABLED                              %s║%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}" \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
+  printf '%s║%s  %s✓%s BBR + FQ NETWORK ENGINE ACTIVE                             %s║%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}" "${COLOR_GREEN}" "${COLOR_RESET}" \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
   if [[ "${CDN_TLS_READY}" == true ]]; then
-    printf '%s[3] CDN 备用节点｜先切换橙云，再导入%s\n' \
-      "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '%s\n\n' "${CDN_LINK}"
-    printf '%s接下来：%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-    printf '  1. 分别测试Reality和HY2。\n'
-    printf '  2. Cloudflare将%s改成橙云，并设为“完全（严格）”。\n' "${CDN_DOMAIN}"
-    printf '  3. 测试CDN节点。\n'
-    printf '  4. Clash Verge添加下方统一订阅。\n'
+    printf '%s║%s  %s!%s CLOUDFLARE: SWITCH CDN RECORD TO ORANGE CLOUD              %s║%s\n' \
+      "${COLOR_MAGENTA}" "${COLOR_RESET}" "${COLOR_YELLOW}" "${COLOR_RESET}" \
+      "${COLOR_MAGENTA}" "${COLOR_RESET}"
   else
-    printf '%s[3] CDN 备用节点｜证书未就绪，暂时不要导入%s\n' \
-      "${COLOR_RED}" "${COLOR_RESET}"
-    printf '%s\n\n' "${CDN_LINK}"
-    printf 'Reality和HY2可以先使用；CDN需要继续排查。\n'
-    printf 'CDN 排查命令：journalctl -u caddy -n 100 --no-pager\n'
+    printf '%s║%s  %s!%s CDN TLS: CERTIFICATE PENDING - DO NOT IMPORT NODE          %s║%s\n' \
+      "${COLOR_MAGENTA}" "${COLOR_RESET}" "${COLOR_YELLOW}" "${COLOR_RESET}" \
+      "${COLOR_MAGENTA}" "${COLOR_RESET}"
   fi
+  printf '%s╚═══════════════════════════════════════════════════════════════╝%s\n' \
+    "${COLOR_MAGENTA}" "${COLOR_RESET}"
 
-  printf '\n%s── 保存位置 ──%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '  客户端信息：%s\n' "${RESULT_FILE}"
-  printf '  重新查看：  cat %s\n' "${RESULT_FILE}"
-  printf '\n%s── Clash Verge 远程订阅｜直接复制 ──%s\n' \
-    "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '%s\n\n' "${CLASH_SUBSCRIPTION_URL}"
-  printf '在 Clash Verge 的“订阅”页面新建远程订阅，粘贴上面的地址。\n'
-  printf '%s  ! 注意：订阅链接等同节点密码，不要公开。%s\n' \
+  printf '\n%s>>> TARGET 01 :: REALITY :: READY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '%s\n' "${REALITY_LINK}"
+  printf '\n%s>>> TARGET 02 :: HYSTERIA 2 :: READY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '%s\n' "${HY2_LINK}"
+  printf '%s   ! [ACTION]%s %s 必须始终保持灰云。\n' \
+    "${COLOR_YELLOW}" "${COLOR_RESET}" "${HY2_DOMAIN}"
+  if [[ "${CDN_TLS_READY}" == true ]]; then
+    printf '\n%s>>> TARGET 03 :: CF_EDGE :: ACTION REQUIRED%s\n' \
+      "${COLOR_CYAN}" "${COLOR_RESET}"
+  else
+    printf '\n%s>>> TARGET 03 :: CF_EDGE :: TLS PENDING%s\n' \
+      "${COLOR_YELLOW}" "${COLOR_RESET}"
+  fi
+  printf '%s\n' "${CDN_LINK}"
+
+  printf '\n%sSUBSCRIPTION ::%s %s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}" "${CLASH_SUBSCRIPTION_URL}"
+  printf '%sCLIENT INFO  ::%s %s\n' \
+    "${COLOR_DIM}" "${COLOR_RESET}" "${RESULT_FILE}"
+  printf '%sREOPEN       ::%s cat %s\n' \
+    "${COLOR_DIM}" "${COLOR_RESET}" "${RESULT_FILE}"
+  if [[ "${CDN_TLS_READY}" != true ]]; then
+    printf '%sDIAGNOSE     ::%s journalctl -u caddy -n 100 --no-pager\n' \
+      "${COLOR_DIM}" "${COLOR_RESET}"
+  fi
+  printf '\n%s   ! [SECURITY]%s 订阅链接等同节点密码，不要公开。\n' \
     "${COLOR_RED}" "${COLOR_RESET}"
 }
 
