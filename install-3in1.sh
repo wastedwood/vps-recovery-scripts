@@ -93,8 +93,9 @@ cleanup() {
 on_error() {
   local exit_code=$?
   local line_no=${1:-unknown}
-  printf '\n错误：脚本在第 %s 行停止，退出码 %s。\n' "${line_no}" "${exit_code}" >&2
-  printf '请不要反复执行。先查看上方第一条错误信息。\n' >&2
+  printf '\n%s  ✗ 脚本异常中止%s\n' "${COLOR_RED}" "${COLOR_RESET}" >&2
+  printf '    位置：第 %s 行；退出码：%s\n' "${line_no}" "${exit_code}" >&2
+  printf '    请先查看上方第一条错误信息，不要反复执行脚本。\n' >&2
   exit "${exit_code}"
 }
 
@@ -103,20 +104,30 @@ trap 'on_error "$LINENO"' ERR
 
 say() {
   STEP_NO=$((STEP_NO + 1))
-  printf '\n%s[步骤 %s] %s%s\n' "${COLOR_CYAN}" "${STEP_NO}" "$1" "${COLOR_RESET}"
+  printf '\n%s━━ [步骤 %02d] %s ━━%s\n' \
+    "${COLOR_CYAN}" "${STEP_NO}" "$1" "${COLOR_RESET}"
+}
+
+input_title() {
+  printf '\n%s── [输入 %s/4] %s%s\n' \
+    "${COLOR_CYAN}" "$1" "$2" "${COLOR_RESET}"
 }
 
 ok() {
-  printf '%s✓ %s%s\n' "${COLOR_GREEN}" "$1" "${COLOR_RESET}"
+  printf '%s  ✓ %s%s\n' "${COLOR_GREEN}" "$1" "${COLOR_RESET}"
 }
 
 warn() {
-  printf '%s! %s%s\n' "${COLOR_YELLOW}" "$1" "${COLOR_RESET}" >&2
+  printf '%s  ! %s%s\n' "${COLOR_YELLOW}" "$1" "${COLOR_RESET}" >&2
 }
 
 die() {
-  printf '\n%s错误：%s%s\n' "${COLOR_RED}" "$1" "${COLOR_RESET}" >&2
+  printf '\n%s  ✗ 错误：%s%s\n' "${COLOR_RED}" "$1" "${COLOR_RESET}" >&2
   exit 1
+}
+
+wait_status() {
+  printf '  %s…%s 正在等待 %s' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"
 }
 
 require_root() {
@@ -181,9 +192,11 @@ refuse_existing_installation() {
 }
 
 read_inputs() {
-  printf '\n%s============================================================%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '%s  VPS 三节点部署向导%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '%s============================================================%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '%s              VPS 三节点部署向导%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}"
   printf '完成后将得到三个独立节点和一条 Clash Verge 订阅：\n'
   printf '  1. Reality：主节点，部署后立即测试\n'
   printf '  2. Hysteria 2：UDP弱网备用节点\n'
@@ -206,14 +219,14 @@ read_inputs() {
   printf '  TTL：自动\n\n'
   printf '脚本会核对两个域名；不符合条件时会停止。\n\n'
 
-  printf '\n%s[输入 1/4] CDN 子域名%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  input_title 1 "CDN 子域名"
   printf '填写刚才在 Cloudflare 创建的完整域名，例如 cdn.example.com。\n'
   read -r -p "请输入: " CDN_DOMAIN
   CDN_DOMAIN="${CDN_DOMAIN,,}"
   [[ "${CDN_DOMAIN}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
     || die "CDN 域名格式不正确。"
 
-  printf '\n%s[输入 2/4] HY2 子域名%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  input_title 2 "HY2 子域名"
   printf '该域名必须始终保持灰云，例如 hy2.example.com。\n'
   read -r -p "请输入: " HY2_DOMAIN
   HY2_DOMAIN="${HY2_DOMAIN,,}"
@@ -222,7 +235,7 @@ read_inputs() {
   [[ "${HY2_DOMAIN}" != "${CDN_DOMAIN}" ]] \
     || die "CDN 与 HY2 必须使用两个不同的子域名。"
 
-  printf '\n%s[输入 3/4] Reality 目标%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  input_title 3 "Reality 目标"
   printf '不了解这项就直接按回车，使用默认值 www.debian.org:443。\n'
   read -r -p "请输入（可直接回车）: " REALITY_TARGET
   REALITY_TARGET="${REALITY_TARGET:-www.debian.org:443}"
@@ -234,17 +247,17 @@ read_inputs() {
   (( REALITY_TARGET_PORT >= 1 && REALITY_TARGET_PORT <= 65535 )) \
     || die "REALITY 目标端口超出范围。"
 
-  printf '\n%s[输入 4/4] 证书联系邮箱%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  input_title 4 "证书联系邮箱"
   printf '这项可留空，直接按回车即可。\n'
   read -r -p "请输入（可直接回车）: " ACME_EMAIL
   if [[ -n "${ACME_EMAIL}" && ! "${ACME_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
     die "邮箱格式不正确。"
   fi
 
-  printf '\n%s即将部署：%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '  REALITY: VPS_IP:%s，目标 %s\n' "${REALITY_PORT}" "${REALITY_TARGET}"
-  printf '  HY2:     %s:%s/UDP，始终灰云\n' "${HY2_DOMAIN}" "${HY2_PORT}"
-  printf '  CDN:     %s:%s，经 Caddy 转到 127.0.0.1:%s\n' \
+  printf '\n%s── 部署确认 ──%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+  printf '  Reality  VPS_IP:%s；伪装目标 %s\n' "${REALITY_PORT}" "${REALITY_TARGET}"
+  printf '  HY2      %s:%s/UDP；始终灰云\n' "${HY2_DOMAIN}" "${HY2_PORT}"
+  printf '  CDN      %s:%s；转发到 127.0.0.1:%s\n' \
     "${CDN_DOMAIN}" "${CDN_PORT}" "${WS_LOCAL_PORT}"
   printf '\n继续前请再次确认：两个A记录均为灰云，并已指向这台VPS。\n'
   read -r -p "确认无误后输入 DEPLOY 并回车: " CONFIRM
@@ -545,7 +558,7 @@ install_hysteria() {
   local hysteria_version
   hysteria_version="$(
     hysteria version 2>&1 |
-      awk '/^Version[[:space:]]/ {print $2; exit}'
+      awk -F':[[:space:]]*' '/^Version:/ {print $2; exit}'
   )" || true
   ok "Hysteria 安装完成：${hysteria_version:-版本未知}"
 }
@@ -729,8 +742,8 @@ configure_firewall() {
     local ruleset
     ruleset="$(nft list ruleset 2>/dev/null)" || true
     if [[ -n "${ruleset}" && "${ruleset}" != *"policy accept"* ]]; then
-      printf '警告：检测到 nftables 规则，但未自动放行端口。\n' >&2
-      printf '请手动放行 TCP 80、%s、%s 和 UDP %s。\n' \
+      warn "检测到 nftables 规则，但未自动放行端口。"
+      printf '    请手动放行 TCP 80、%s、%s 和 UDP %s。\n' \
         "${REALITY_PORT}" "${CDN_PORT}" "${HY2_PORT}" >&2
     fi
   fi
@@ -757,7 +770,7 @@ start_services() {
   systemctl enable "${HYSTERIA_SERVICE}" >/dev/null
   systemctl restart "${HYSTERIA_SERVICE}"
 
-  printf '正在等待HY2证书和UDP监听，最长等待120秒'
+  wait_status "Hysteria 证书和 UDP 监听（最长 120 秒）"
   local elapsed=0
   while (( elapsed < 120 )); do
     if systemctl is-active --quiet "${HYSTERIA_SERVICE}" &&
@@ -789,7 +802,7 @@ verify_listeners() {
     die "Hysteria服务已停止。"
   ok "Hysteria服务状态和UDP监听均正常"
 
-  printf '正在等待 Caddy 申请证书，最长等待 %s 秒' "${CERT_WAIT_SECONDS}"
+  wait_status "Caddy 申请证书（最长 ${CERT_WAIT_SECONDS} 秒）"
   local elapsed=0
   while (( elapsed < CERT_WAIT_SECONDS )); do
     if curl -sS --max-time 8 \
@@ -919,19 +932,20 @@ EOF
 
   chmod 600 "${RESULT_FILE}"
 
-  printf '\n%s============================================================%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
-  printf '%s  部署完成：客户端配置已经生成%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-  printf '%s============================================================%s\n\n' "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '\n%s━━━━━━━━━━━━ ━━ 部署完成 ━━ ━━━━━━━━━━━━%s\n' \
+    "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '%s  三个节点和 Clash Verge 订阅均已生成%s\n\n' \
+    "${COLOR_BOLD}" "${COLOR_RESET}"
 
-  printf '%s【1. Reality 主节点——现在直接导入测试】%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '%s[1] Reality 主节点｜现在直接导入测试%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
   printf '%s\n\n' "${REALITY_LINK}"
-  printf '%s【2. HY2 备用节点——现在直接导入测试】%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
+  printf '%s[2] HY2 备用节点｜现在直接导入测试%s\n' "${COLOR_GREEN}" "${COLOR_RESET}"
   printf '%s\n\n' "${HY2_LINK}"
-  printf '%s注意：%s必须始终保持灰云。%s\n\n' \
+  printf '%s  ! 注意：%s 必须始终保持灰云。%s\n\n' \
     "${COLOR_YELLOW}" "${HY2_DOMAIN}" "${COLOR_RESET}"
 
   if [[ "${CDN_TLS_READY}" == true ]]; then
-    printf '%s【3. CDN 备用节点——先去 Cloudflare 切橙云，再导入】%s\n' \
+    printf '%s[3] CDN 备用节点｜先切换橙云，再导入%s\n' \
       "${COLOR_YELLOW}" "${COLOR_RESET}"
     printf '%s\n\n' "${CDN_LINK}"
     printf '%s接下来：%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
@@ -940,19 +954,22 @@ EOF
     printf '  3. 测试CDN节点。\n'
     printf '  4. Clash Verge添加下方统一订阅。\n'
   else
-    printf '%s【3. CDN 备用节点——证书尚未成功，暂时不要导入】%s\n' \
+    printf '%s[3] CDN 备用节点｜证书未就绪，暂时不要导入%s\n' \
       "${COLOR_RED}" "${COLOR_RESET}"
     printf '%s\n\n' "${CDN_LINK}"
     printf 'Reality和HY2可以先使用；CDN需要继续排查。\n'
     printf 'CDN 排查命令：journalctl -u caddy -n 100 --no-pager\n'
   fi
 
-  printf '\n所有信息已保存：%s\n' "${RESULT_FILE}"
-  printf '以后重新查看：cat %s\n' "${RESULT_FILE}"
-  printf '\n%s【Clash Verge 远程订阅——直接复制】%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '\n%s── 保存位置 ──%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+  printf '  客户端信息：%s\n' "${RESULT_FILE}"
+  printf '  重新查看：  cat %s\n' "${RESULT_FILE}"
+  printf '\n%s── Clash Verge 远程订阅｜直接复制 ──%s\n' \
+    "${COLOR_CYAN}" "${COLOR_RESET}"
   printf '%s\n\n' "${CLASH_SUBSCRIPTION_URL}"
   printf '在 Clash Verge 的“订阅”页面新建远程订阅，粘贴上面的地址。\n'
-  printf '%s注意：订阅链接等同节点密码，不要公开。%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+  printf '%s  ! 注意：订阅链接等同节点密码，不要公开。%s\n' \
+    "${COLOR_RED}" "${COLOR_RESET}"
 }
 
 check_open_ports_notice() {
@@ -962,7 +979,7 @@ check_open_ports_notice() {
       printf 'UFW已放行TCP 80、%s、%s和UDP %s。\n' \
         "${REALITY_PORT}" "${CDN_PORT}" "${HY2_PORT}"
     else
-      printf '检测到 UFW 但未激活。如果连接不上，请检查 VPS 控制台的防火墙规则。\n'
+      warn "检测到 UFW 但未激活；如果连接不上，请检查 VPS 控制台防火墙。"
     fi
   elif command -v nft >/dev/null 2>&1; then
     local ruleset
@@ -971,8 +988,9 @@ check_open_ports_notice() {
       printf '未检测到 nftables 规则，系统默认放行所有流量。\n'
     fi
   else
-    printf '未检测到UFW或nftables。如果连接不上，请检查TCP 80、%s、%s和UDP %s。\n' \
-      "${REALITY_PORT}" "${CDN_PORT}" "${HY2_PORT}"
+    warn "未检测到 UFW 或 nftables；请检查 VPS 控制台防火墙。"
+    printf '    需要放行 TCP 80、%s、%s 和 UDP %s。\n' \
+      "${REALITY_PORT}" "${CDN_PORT}" "${HY2_PORT}" >&2
   fi
 }
 
