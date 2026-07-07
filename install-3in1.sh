@@ -31,7 +31,7 @@
 #   5. BBR 拥塞控制和 fq 队列
 #
 # 设计原则：
-# - 仅面向空白服务器，不覆盖 3x-ui 或已有 sing-box/Caddy 部署。
+# - 仅面向空白服务器，不覆盖 3x-ui 或已有 sing-box/Xray/Caddy 部署。
 # - 使用固定版本的 sing-box 和 Caddy 官方 Debian 软件源。
 # - 自动生成新的 UUID、REALITY 密钥、Short ID 和 WebSocket 路径。
 # - 不创建网页面板、数据库或流量统计；订阅文件由本机 Caddy 自托管。
@@ -48,6 +48,7 @@ readonly SING_BOX_SHA256_ARM64="4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee
 readonly HYSTERIA_INSTALL_URL="https://raw.githubusercontent.com/apernet/hysteria/master/scripts/install_server.sh"
 readonly SING_BOX_CONFIG="/etc/sing-box/config.json"
 readonly SING_BOX_SERVICE="/etc/systemd/system/sing-box.service"
+readonly LEGACY_XRAY_CONFIG="/usr/local/etc/xray/config.json"
 readonly HYSTERIA_CONFIG="/etc/hysteria/config.yaml"
 readonly HYSTERIA_SERVICE="hysteria-server.service"
 readonly CADDY_CONFIG="/etc/caddy/Caddyfile"
@@ -152,6 +153,10 @@ refuse_existing_installation() {
     [[ -e "${SING_BOX_CONFIG}" ]] ||
     [[ -e "${SING_BOX_SERVICE}" ]]; then
     die "检测到已有 sing-box。本脚本不会覆盖现有配置。"
+  fi
+
+  if command -v xray >/dev/null 2>&1 || [[ -e "${LEGACY_XRAY_CONFIG}" ]]; then
+    die "检测到已有 Xray。为避免服务或端口冲突，请换空白 VPS 测试。"
   fi
 
   if command -v caddy >/dev/null 2>&1 || [[ -e "${CADDY_CONFIG}" ]]; then

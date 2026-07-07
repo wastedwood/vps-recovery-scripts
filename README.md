@@ -26,8 +26,8 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-3in1.sh)
 ```
 
-脚本不覆盖已有 sing-box、Caddy 或 Hysteria 部署。sing-box 固定使用经过
-SHA256 校验的 1.13.14 版本，避免上游更新突然改变配置格式。
+脚本不覆盖已有 sing-box、Xray、Caddy 或 Hysteria 部署。sing-box 固定使用
+经过 SHA256 校验的 1.13.14 版本，避免上游更新突然改变配置格式。
 
 ## 安装结果
 
