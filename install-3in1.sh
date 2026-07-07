@@ -31,25 +31,28 @@
 #   5. BBR 拥塞控制和 fq 队列
 #
 # 设计原则：
-# - 仅面向空白服务器，不覆盖 3x-ui 或已有 Xray/Caddy 部署。
-# - 使用 XTLS 官方 Xray 安装脚本和 Caddy 官方 Debian 软件源。
+# - 仅面向空白服务器，不覆盖 3x-ui 或已有 sing-box/Caddy 部署。
+# - 使用固定版本的 sing-box 和 Caddy 官方 Debian 软件源。
 # - 自动生成新的 UUID、REALITY 密钥、Short ID 和 WebSocket 路径。
 # - 不创建网页面板、数据库或流量统计；订阅文件由本机 Caddy 自托管。
 #
-# 状态：已在全新Vultr VPS完整实测，Reality、CDN、HY2、BBR和Clash订阅均可用。
-# 最后审查：2026-06-23
+# 状态：sing-box替换已完成静态检查，尚未在真实VPS完整实测。
+# 最后审查：2026-07-07
 
 set -Eeuo pipefail
 umask 077
 
-readonly XRAY_INSTALL_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+readonly SING_BOX_VERSION="1.13.14"
+readonly SING_BOX_SHA256_AMD64="f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697"
+readonly SING_BOX_SHA256_ARM64="4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e"
 readonly HYSTERIA_INSTALL_URL="https://raw.githubusercontent.com/apernet/hysteria/master/scripts/install_server.sh"
-readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
+readonly SING_BOX_CONFIG="/etc/sing-box/config.json"
+readonly SING_BOX_SERVICE="/etc/systemd/system/sing-box.service"
 readonly HYSTERIA_CONFIG="/etc/hysteria/config.yaml"
 readonly HYSTERIA_SERVICE="hysteria-server.service"
 readonly CADDY_CONFIG="/etc/caddy/Caddyfile"
 readonly BBR_CONFIG="/etc/sysctl.d/99-bbr.conf"
-readonly RESULT_FILE="/root/xray-client-info.txt"
+readonly RESULT_FILE="/root/sing-box-client-info.txt"
 readonly CLASH_PROFILE="/root/clash-verge.yaml"
 readonly SUBSCRIPTION_DIR="/var/lib/caddy/subscriptions"
 readonly WS_LOCAL_PORT="10000"
@@ -61,6 +64,8 @@ readonly CERT_WAIT_SECONDS="120"
 TEMP_DIR=""
 STEP_NO=0
 CDN_TLS_READY=false
+ARCH=""
+SING_BOX_SHA256=""
 
 if [[ -t 1 ]]; then
   readonly COLOR_GREEN=$'\033[1;32m'
@@ -143,8 +148,10 @@ refuse_existing_installation() {
     die "检测到 3x-ui/x-ui。本脚本不会覆盖现有面板，请换空白 VPS 测试。"
   fi
 
-  if command -v xray >/dev/null 2>&1 || [[ -e "${XRAY_CONFIG}" ]]; then
-    die "检测到已有 Xray。本脚本不会覆盖现有配置。"
+  if command -v sing-box >/dev/null 2>&1 ||
+    [[ -e "${SING_BOX_CONFIG}" ]] ||
+    [[ -e "${SING_BOX_SERVICE}" ]]; then
+    die "检测到已有 sing-box。本脚本不会覆盖现有配置。"
   fi
 
   if command -v caddy >/dev/null 2>&1 || [[ -e "${CADDY_CONFIG}" ]]; then
@@ -243,8 +250,8 @@ install_base_packages() {
   say "安装基础工具"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    ca-certificates curl debian-archive-keyring debian-keyring \
-    dnsutils gnupg iproute2 kmod openssl
+    ca-certificates coreutils curl debian-archive-keyring debian-keyring \
+    dnsutils gnupg iproute2 kmod openssl tar
   ok "基础工具安装完成"
 }
 
@@ -317,25 +324,45 @@ detect_public_ip() {
   done
 }
 
-install_xray() {
-  say "安装官方 Xray-core"
-  curl -fsSL "${XRAY_INSTALL_URL}" -o "${TEMP_DIR}/xray-install.sh"
-  if ! bash "${TEMP_DIR}/xray-install.sh" install >"${TEMP_DIR}/xray-install.log" 2>&1; then
-    cat "${TEMP_DIR}/xray-install.log" >&2
-    die "Xray-core 安装失败。"
-  fi
-  command -v xray >/dev/null 2>&1 || die "Xray 安装后未找到可执行文件。"
-  local xray_version
-  xray_version="$(xray version 2>/dev/null)"
-  xray_version="${xray_version%%$'\n'*}"
-  ok "Xray-core 安装完成：${xray_version}"
+install_sing_box() {
+  say "安装固定版本 sing-box"
+
+  case "$(uname -m)" in
+    x86_64|amd64)
+      ARCH="amd64"
+      SING_BOX_SHA256="${SING_BOX_SHA256_AMD64}"
+      ;;
+    aarch64|arm64)
+      ARCH="arm64"
+      SING_BOX_SHA256="${SING_BOX_SHA256_ARM64}"
+      ;;
+    *)
+      die "不支持CPU架构 $(uname -m)，仅支持 amd64 和 arm64。"
+      ;;
+  esac
+
+  local archive="sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz"
+  local download_url="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
+
+  curl -fL --retry 2 --retry-delay 2 "${download_url}" -o "${TEMP_DIR}/${archive}"
+  printf '%s  %s\n' "${SING_BOX_SHA256}" "${TEMP_DIR}/${archive}" |
+    sha256sum -c - >/dev/null || die "sing-box 安装包校验失败。"
+  tar -xzf "${TEMP_DIR}/${archive}" -C "${TEMP_DIR}"
+  install -m 755 \
+    "${TEMP_DIR}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}/sing-box" \
+    /usr/local/bin/sing-box
+
+  command -v sing-box >/dev/null 2>&1 || die "sing-box 安装后未找到可执行文件。"
+  sing-box version | grep -Fq "sing-box version ${SING_BOX_VERSION}" \
+    || die "sing-box 版本检查失败。"
+  ok "sing-box ${SING_BOX_VERSION} 安装完成，SHA256校验通过"
 }
 
 generate_credentials() {
   say "生成随机凭证"
 
-  REALITY_UUID="$(xray uuid)"
-  CDN_UUID="$(xray uuid)"
+  REALITY_UUID="$(sing-box generate uuid)"
+  CDN_UUID="$(sing-box generate uuid)"
   SHORT_ID="$(openssl rand -hex 8)"
   WS_PATH="/$(openssl rand -hex 12)"
   SUBSCRIPTION_PATH="/$(openssl rand -hex 24).yaml"
@@ -346,15 +373,12 @@ generate_credentials() {
   done
 
   local key_output
-  key_output="$(xray x25519)"
-  # 兼容新旧版 xray x25519 输出：
-  #   新版：PrivateKey / Password
-  #   旧版：Private key / Public key（或 Password (PublicKey)）
+  key_output="$(sing-box generate reality-keypair)"
   REALITY_PRIVATE_KEY="$(
     awk -F': *' '/^PrivateKey:|^Private key:/ {print $2; exit}' <<<"${key_output}"
   )"
   REALITY_PUBLIC_KEY="$(
-    awk -F': *' '/^Password:|^Password \(PublicKey\):|^Public key:/ {print $2; exit}' <<<"${key_output}"
+    awk -F': *' '/^PublicKey:|^Public key:/ {print $2; exit}' <<<"${key_output}"
   )"
 
   [[ -n "${REALITY_PRIVATE_KEY}" ]] || die "无法解析 REALITY 私钥。"
@@ -362,143 +386,122 @@ generate_credentials() {
   ok "Reality、CDN、HY2凭证及随机路径已生成"
 }
 
-write_xray_config() {
-  say "写入 Xray 配置"
-  install -d -m 755 "$(dirname "${XRAY_CONFIG}")"
+write_sing_box_config() {
+  say "写入 sing-box 配置"
+  install -d -m 700 "$(dirname "${SING_BOX_CONFIG}")"
 
-  cat >"${XRAY_CONFIG}" <<EOF
+  cat >"${SING_BOX_CONFIG}" <<EOF
 {
   "log": {
-    "loglevel": "warning"
+    "level": "warn",
+    "timestamp": true
   },
   "inbounds": [
     {
+      "type": "vless",
       "tag": "vless-reality",
       "listen": "0.0.0.0",
-      "port": ${REALITY_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${REALITY_UUID}",
-            "flow": "xtls-rprx-vision",
-            "email": "reality"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "raw",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "${REALITY_TARGET}",
-          "xver": 0,
-          "serverNames": [
-            "${REALITY_SERVER_NAME}"
-          ],
-          "privateKey": "${REALITY_PRIVATE_KEY}",
-          "shortIds": [
+      "listen_port": ${REALITY_PORT},
+      "users": [
+        {
+          "name": "reality",
+          "uuid": "${REALITY_UUID}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${REALITY_SERVER_NAME}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "${REALITY_SERVER_NAME}",
+            "server_port": ${REALITY_TARGET_PORT}
+          },
+          "private_key": "${REALITY_PRIVATE_KEY}",
+          "short_id": [
             "${SHORT_ID}"
           ]
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
       }
     },
     {
+      "type": "vless",
       "tag": "vless-websocket",
       "listen": "127.0.0.1",
-      "port": ${WS_LOCAL_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${CDN_UUID}",
-            "email": "cdn"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "websocket",
-        "security": "none",
-        "wsSettings": {
-          "acceptProxyProtocol": false,
-          "path": "${WS_PATH}"
+      "listen_port": ${WS_LOCAL_PORT},
+      "users": [
+        {
+          "name": "cdn",
+          "uuid": "${CDN_UUID}"
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ]
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "${WS_PATH}"
       }
     }
   ],
   "outbounds": [
     {
-      "tag": "direct",
-      "protocol": "freedom"
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole"
+      "type": "direct",
+      "tag": "direct"
     }
   ],
-  "routing": {
-    "domainStrategy": "AsIs",
+  "route": {
     "rules": [
+      { "action": "sniff" },
       {
-        "type": "field",
-        "ip": [
-          "geoip:private"
-        ],
-        "outboundTag": "block"
+        "ip_is_private": true, "action": "reject"
       },
       {
-        "type": "field",
-        "protocol": [
-          "bittorrent"
-        ],
-        "outboundTag": "block"
+        "protocol": "bittorrent", "action": "reject"
       }
-    ]
+    ],
+    "final": "direct"
   }
 }
 EOF
 
-  local xray_user
-  xray_user="$(systemctl show xray --property=User --value)"
-  [[ -n "${xray_user}" ]] || xray_user="nobody"
-  chown "${xray_user}:$(id -gn "${xray_user}")" "${XRAY_CONFIG}"
-  chmod 600 "${XRAY_CONFIG}"
+  chmod 600 "${SING_BOX_CONFIG}"
 
-  if ! xray run -test -config "${XRAY_CONFIG}" >"${TEMP_DIR}/xray-config-test.log" 2>&1; then
-    cat "${TEMP_DIR}/xray-config-test.log" >&2
-    die "Xray 配置检查失败。"
+  if ! sing-box check -c "${SING_BOX_CONFIG}" >"${TEMP_DIR}/sing-box-config-test.log" 2>&1; then
+    cat "${TEMP_DIR}/sing-box-config-test.log" >&2
+    die "sing-box 配置检查失败。"
   fi
 
-  # Xray 的格式检查可能接受未知字段但在运行时忽略。
-  # 这里额外确认 VLESS 入站确实使用 clients，而不是无效的 users。
-  [[ "$(grep -c '"clients": \[' "${XRAY_CONFIG}")" -eq 2 ]] \
-    || die "Xray 配置语义检查失败：两个 VLESS 入站都必须使用 clients。"
-  if grep -q '"users": \[' "${XRAY_CONFIG}"; then
-    die "Xray 配置语义检查失败：发现无效的 users 字段。"
-  fi
-  grep -Fq "\"id\": \"${REALITY_UUID}\"" "${XRAY_CONFIG}" \
-    || die "Xray 配置中缺少 Reality UUID。"
-  grep -Fq "\"id\": \"${CDN_UUID}\"" "${XRAY_CONFIG}" \
-    || die "Xray 配置中缺少 CDN UUID。"
+  grep -Fq "\"uuid\": \"${REALITY_UUID}\"" "${SING_BOX_CONFIG}" \
+    || die "sing-box 配置中缺少 Reality UUID。"
+  grep -Fq "\"uuid\": \"${CDN_UUID}\"" "${SING_BOX_CONFIG}" \
+    || die "sing-box 配置中缺少 CDN UUID。"
 
-  ok "Xray 格式与 VLESS 用户配置检查通过"
+  ok "sing-box 格式与 VLESS 用户配置检查通过"
+}
+
+write_sing_box_service() {
+  say "写入 sing-box 系统服务"
+
+  cat >"${SING_BOX_SERVICE}" <<EOF
+[Unit]
+Description=sing-box Three-in-One Proxy Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/sing-box run -c ${SING_BOX_CONFIG}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 644 "${SING_BOX_SERVICE}"
+  ok "sing-box 系统服务已写入"
 }
 
 install_caddy() {
@@ -673,8 +676,8 @@ ${CDN_DOMAIN}:${CDN_PORT} {
 		file_server
 	}
 
-	@xray_websocket path ${WS_PATH}
-	handle @xray_websocket {
+	@sing_box_websocket path ${WS_PATH}
+	handle @sing_box_websocket {
 		reverse_proxy 127.0.0.1:${WS_LOCAL_PORT}
 	}
 
@@ -731,14 +734,14 @@ configure_firewall() {
 start_services() {
   say "启动服务"
   systemctl daemon-reload
-  systemctl enable xray
-  systemctl restart xray
+  systemctl enable sing-box
+  systemctl restart sing-box
   systemctl enable caddy
   systemctl restart caddy
 
-  systemctl is-active --quiet xray || {
-    journalctl -u xray -n 50 --no-pager >&2
-    die "Xray 启动失败。"
+  systemctl is-active --quiet sing-box || {
+    journalctl -u sing-box -n 50 --no-pager >&2
+    die "sing-box 启动失败。"
   }
 
   systemctl is-active --quiet caddy || {
@@ -756,7 +759,7 @@ start_services() {
       udp_port_is_listening "${HY2_PORT}"; then
       printf '\n'
       ok "Hysteria证书已申请成功，并监听UDP ${HY2_PORT}"
-      ok "Xray、Caddy和Hysteria均已设置为开机自动运行"
+      ok "sing-box、Caddy和Hysteria均已设置为开机自动运行"
       return
     fi
     printf '.'
@@ -771,9 +774,9 @@ start_services() {
 
 verify_listeners() {
   say "检查端口、证书和三节点完整链路"
-  port_is_listening "${REALITY_PORT}" || die "Xray 没有监听 ${REALITY_PORT}。"
+  port_is_listening "${REALITY_PORT}" || die "sing-box 没有监听 ${REALITY_PORT}。"
   port_is_listening "${CDN_PORT}" || die "Caddy 没有监听 ${CDN_PORT}。"
-  port_is_listening "${WS_LOCAL_PORT}" || die "Xray 没有监听内部 WebSocket 端口。"
+  port_is_listening "${WS_LOCAL_PORT}" || die "sing-box 没有监听内部 WebSocket 端口。"
   udp_port_is_listening "${HY2_PORT}" || die "Hysteria 没有监听 UDP ${HY2_PORT}。"
   ok "Reality TCP 443、HY2 UDP 443、CDN 8443和内部WebSocket端口均正常"
 
@@ -821,7 +824,7 @@ verify_listeners() {
     journalctl -u caddy -n 50 --no-pager >&2
     die "WebSocket 升级失败（HTTP ${ws_http_code:-无响应}）。请检查 Caddy 路由和路径。"
   }
-  ok "WebSocket 请求已由 Caddy 正确转发到 Xray（HTTP 101）"
+  ok "WebSocket 请求已由 Caddy 正确转发到 sing-box（HTTP 101）"
 
   local downloaded_profile="${TEMP_DIR}/clash-verge-download.yaml"
   curl -fsS --max-time 10 \
@@ -854,7 +857,7 @@ write_client_info() {
   CLASH_SUBSCRIPTION_URL="https://${CDN_DOMAIN}:${CDN_PORT}${SUBSCRIPTION_PATH}"
 
   cat >"${RESULT_FILE}" <<EOF
-Xray 节点信息
+sing-box 节点信息
 生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
 ============================================================
@@ -882,7 +885,7 @@ Clash Verge不要导入单节点链接，使用下面的统一订阅。
 远程订阅链接：
 ${CLASH_SUBSCRIPTION_URL}
 
-在 Clash Verge 的“订阅”页面新建远程订阅，粘贴上面的 HTTPS 地址。
+在 Clash Verge 的「订阅」页面新建远程订阅，粘贴上面的 HTTPS 地址。
 
 ============================================================
 三、你接下来要做什么
@@ -893,7 +896,7 @@ ${CLASH_SUBSCRIPTION_URL}
 3. Cloudflare中暂时保持${CDN_DOMAIN}为灰云。
 4. CDN证书状态：${cdn_status}。
 5. 证书就绪后，把${CDN_DOMAIN}切换为橙云。
-6. Cloudflare的SSL/TLS加密模式设为“完全（严格）”。
+6. Cloudflare的SSL/TLS加密模式设为「完全（严格）」。
 7. 测试CDN节点。
 8. Clash Verge使用上方统一订阅，一次获得三个节点。
 
@@ -901,7 +904,7 @@ ${CLASH_SUBSCRIPTION_URL}
 journalctl -u caddy -n 100 --no-pager
 
 服务端配置位置：
-Xray：${XRAY_CONFIG}
+sing-box：${SING_BOX_CONFIG}
 Hysteria：${HYSTERIA_CONFIG}
 Caddy：${CADDY_CONFIG}
 Clash Verge：${CLASH_PROFILE}
@@ -979,9 +982,10 @@ main() {
   install_base_packages
   enable_bbr
   detect_public_ip
-  install_xray
+  install_sing_box
   generate_credentials
-  write_xray_config
+  write_sing_box_config
+  write_sing_box_service
   install_caddy
   install_hysteria
   write_hysteria_config

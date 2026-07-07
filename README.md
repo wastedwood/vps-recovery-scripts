@@ -1,6 +1,6 @@
 # VPS Recovery Scripts
 
-一次部署三条独立代理通道：
+使用 sing-box、独立 Hysteria 2 和 Caddy，一次部署三条代理通道：
 
 - VLESS + Reality：TCP 443
 - Hysteria 2：UDP 443
@@ -26,7 +26,8 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/wastedwood/vps-recovery-scripts/main/install-3in1.sh)
 ```
 
-脚本不覆盖已有 Xray、Caddy 或 Hysteria 部署。
+脚本不覆盖已有 sing-box、Caddy 或 Hysteria 部署。sing-box 固定使用经过
+SHA256 校验的 1.13.14 版本，避免上游更新突然改变配置格式。
 
 ## 安装结果
 
